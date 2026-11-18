@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ffuf/ffuf/v2/pkg/ffuf"
@@ -36,6 +37,7 @@ type Stdoutput struct {
 	stdoutIsTerminal bool
 	stderrIsTerminal bool
 	paused           bool // when set, Result records matches but does not print them
+	sarifSuccessful  atomic.Bool
 }
 
 func NewStdoutput(conf *ffuf.Config) *Stdoutput {
@@ -46,6 +48,7 @@ func NewStdoutput(conf *ffuf.Config) *Stdoutput {
 	outp.fuzzkeywords = make([]string, 0)
 	outp.stdoutIsTerminal = isTerminal(os.Stdout)
 	outp.stderrIsTerminal = isTerminal(os.Stderr)
+	outp.sarifSuccessful.Store(true)
 	for _, ip := range conf.InputProviders {
 		outp.fuzzkeywords = append(outp.fuzzkeywords, ip.Keyword)
 	}
@@ -279,6 +282,7 @@ func (s *Stdoutput) Info(infostring string) {
 }
 
 func (s *Stdoutput) Error(errstring string) {
+	s.sarifSuccessful.Store(false)
 	if s.config.Quiet {
 		fmt.Fprintf(os.Stderr, "%s", errstring)
 	} else {
@@ -383,6 +387,16 @@ func (s *Stdoutput) SaveFile(filename, format string) error {
 		err = writeCSV(filename, s.config, all, false)
 	case "ecsv":
 		err = writeCSV(filename, s.config, all, true)
+	case "sarif":
+		successful := s.sarifSuccessful.Load()
+		if s.config.Context != nil && s.config.Context.Err() != nil {
+			successful = false
+		}
+		if successful {
+			err = writeSARIF(filename, s.config, all)
+		} else {
+			err = writeSARIFWithStatus(filename, s.config, all, false)
+		}
 	}
 	return err
 }

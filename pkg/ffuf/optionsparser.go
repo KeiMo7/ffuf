@@ -107,7 +107,7 @@ type OutputOptions struct {
 	DebugLog            string `json:"debug_log" ffuf:"debug-log" section:"output" usage:"Write all of the internal logging to the specified file."`
 	OutputDirectory     string `json:"output_directory" ffuf:"od" section:"output" usage:"Directory path to store matched results to."`
 	OutputFile          string `json:"output_file" ffuf:"o" section:"output" usage:"Write output to file"`
-	OutputFormat        string `json:"output_format" ffuf:"of" section:"output" usage:"Output file format. Available formats: json, ejson, html, md, csv, ecsv (or, 'all' for all formats)"`
+	OutputFormat        string `json:"output_format" ffuf:"of" section:"output" usage:"Output file format. Available formats: json, ejson, html, md, csv, ecsv, sarif (or, 'all' for all formats except sarif)"`
 	OutputSkipEmptyFile bool   `json:"output_skip_empty" ffuf:"or" section:"output" usage:"Don't create the output file if we don't have results"`
 }
 
@@ -498,7 +498,7 @@ func ConfigFromOptions(parseOpts *ConfigOptions, ctx context.Context, cancel con
 	//Check the output file format option
 	if parseOpts.Output.OutputFile != "" {
 		//No need to check / error out if output file isn't defined
-		outputFormats := []string{"all", "json", "ejson", "html", "md", "csv", "ecsv"}
+		outputFormats := []string{"all", "json", "ejson", "html", "md", "csv", "ecsv", "sarif"}
 		found := false
 		for _, f := range outputFormats {
 			if f == parseOpts.Output.OutputFormat {

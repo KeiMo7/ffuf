@@ -239,7 +239,7 @@ OUTPUT OPTIONS:
   -debug-log          Write all of the internal logging to the specified file.
   -o                  Write output to file
   -od                 Directory path to store matched results to.
-  -of                 Output file format. Available formats: json, ejson, html, md, csv, ecsv (or, 'all' for all formats) (default: json)
+  -of                 Output file format. Available formats: json, ejson, html, md, csv, ecsv, sarif (or, 'all' for all formats except sarif) (default: json)
   -or                 Don't create the output file if we don't have results (default: false)
 
 EXAMPLE USAGE:
