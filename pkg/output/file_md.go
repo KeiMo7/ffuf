@@ -18,6 +18,16 @@ const (
   {{ range .Keys }}| :- {{ end }}| :-- | :--------------- | :---- | :------- | :---------- | :------------- | :------------ | :--------- | :----------- | :------------ | :-------- |
   {{range .Results}}{{ range $keyword, $value := .Input }}| {{ $value | printf "%s" }} {{ end }}| {{ .Url }} | {{ .RedirectLocation }} | {{ .Position }} | {{ .StatusCode }} | {{ .ContentLength }} | {{ .ContentWords }} | {{ .ContentLines }} | {{ .ContentType }} | {{ .Duration}} | {{ .ResultFile }} | {{ .ScraperData }} | {{ .FfufHash }}
   {{end}}` // The template format is not pretty but follows the markdown guide
+
+	markdownTemplateDedup = `# FFUF Report
+
+  Command line : ` + "`{{.CommandLine}}`" + `
+  Time: ` + "{{ .Time }}" + `
+
+  {{ range .Keys }}| {{ . }} {{ end }}| URL | Redirectlocation | Position | Status Code | Content Length | Content Words | Content Lines | Content Type | Duration | ResultFile | ScraperData | Ffufhash | Dedup Round | Dedup Equivalent | Equivalent Rounds | Folded Count | Original Paths | Fingerprint Source | Fingerprint Valid | Fingerprint Empty
+  {{ range .Keys }}| :- {{ end }}| :-- | :--------------- | :---- | :------- | :---------- | :------------- | :------------ | :--------- | :----------- | :------------ | :-------- | :---- | :------- | :---------------- | :----------- | :------------- | :----------------- | :------- | :-------
+  {{range .Results}}{{ range $keyword, $value := .Input }}| {{ $value | printf "%s" }} {{ end }}| {{ .Url }} | {{ .RedirectLocation }} | {{ .Position }} | {{ .StatusCode }} | {{ .ContentLength }} | {{ .ContentWords }} | {{ .ContentLines }} | {{ .ContentType }} | {{ .Duration}} | {{ .ResultFile }} | {{ .ScraperData }} | {{ .FfufHash }}{{if .Dedup}} | {{ .Dedup.Round }} | {{ .Dedup.Equivalent }} | {{ printf "%v" .Dedup.EquivalentRounds }} | {{ .Dedup.FoldedCount }} | {{ printf "%v" .Dedup.OriginalPaths }} | {{ .Dedup.FingerprintSource }} | {{ .Dedup.FingerprintValid }} | {{ .Dedup.FingerprintEmpty }}{{else}} | | false | [] | 0 | [] | | false | false{{end}}
+  {{end}}`
 )
 
 func writeMarkdown(filename string, config *ffuf.Config, results []ffuf.Result) error {
@@ -70,6 +80,7 @@ func writeMarkdown(filename string, config *ffuf.Config, results []ffuf.Result) 
 			Url:              r.Url,
 			Host:             r.Host,
 			FfufHash:         ffufhash,
+			Dedup:            r.Dedup,
 		}
 		htmlResults = append(htmlResults, hres)
 	}
@@ -89,7 +100,11 @@ func writeMarkdown(filename string, config *ffuf.Config, results []ffuf.Result) 
 
 	templateName := "output.md"
 	t := template.New(templateName).Delims("{{", "}}")
-	_, err = t.Parse(markdownTemplate)
+	templateBody := markdownTemplate
+	if config.Dedup {
+		templateBody = markdownTemplateDedup
+	}
+	_, err = t.Parse(templateBody)
 	if err != nil {
 		return err
 	}

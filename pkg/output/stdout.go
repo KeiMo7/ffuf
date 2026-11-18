@@ -36,6 +36,7 @@ type Stdoutput struct {
 	stdoutIsTerminal bool
 	stderrIsTerminal bool
 	paused           bool // when set, Result records matches but does not print them
+	dedup            *dedupManager
 }
 
 func NewStdoutput(conf *ffuf.Config) *Stdoutput {
@@ -50,6 +51,10 @@ func NewStdoutput(conf *ffuf.Config) *Stdoutput {
 		outp.fuzzkeywords = append(outp.fuzzkeywords, ip.Keyword)
 	}
 	sort.Strings(outp.fuzzkeywords)
+	outp.dedup = newDedupManager(conf)
+	if outp.dedup != nil {
+		conf.FingerprintProvider = outp.dedup
+	}
 	return &outp
 }
 
@@ -193,6 +198,7 @@ func (s *Stdoutput) Banner() {
 		printOption([]byte("Filter"), []byte(f.ReprVerbose()))
 	}
 	fmt.Fprintf(os.Stderr, "%s\n\n", BANNER_SEP)
+	s.emitDedupWarnings()
 }
 
 // Reset resets the result slice
@@ -363,6 +369,9 @@ func (s *Stdoutput) SaveFile(filename, format string) error {
 	all = append(all, s.Results...)
 	all = append(all, s.CurrentResults...)
 	s.resultMutex.Unlock()
+	if s.dedup != nil {
+		s.dedup.Decorate(all)
+	}
 
 	if s.config.OutputSkipEmptyFile && len(all) == 0 {
 		s.Info("No results and -or defined, output file not written.")
@@ -396,6 +405,15 @@ func (s *Stdoutput) Finalize() error {
 			s.Error(err.Error())
 		}
 	}
+	if s.dedup != nil {
+		summary := s.dedup.Finish()
+		s.emitDedupWarnings()
+		if s.config.Quiet {
+			fmt.Fprintf(os.Stderr, "%s\n", summary)
+		} else {
+			s.Info(summary)
+		}
+	}
 	if !s.config.Quiet {
 		fmt.Fprintf(os.Stderr, "\n")
 	}
@@ -403,11 +421,6 @@ func (s *Stdoutput) Finalize() error {
 }
 
 func (s *Stdoutput) Result(resp ffuf.Response) {
-	// Do we want to write request and response to a file
-	if len(s.config.OutputDirectory) > 0 {
-		resp.ResultFile = s.writeResultToFile(resp)
-	}
-
 	inputs := make(map[string][]byte, len(resp.Request.Input))
 	for k, v := range resp.Request.Input {
 		inputs[k] = v
@@ -427,6 +440,20 @@ func (s *Stdoutput) Result(resp ffuf.Response) {
 		ResultFile:       resp.ResultFile,
 		Host:             resp.Request.Host,
 	}
+	if s.dedup != nil {
+		decision := s.dedup.Observe(&resp, sResult.Url)
+		if decision.Fold {
+			return
+		}
+		sResult.Dedup = decision.Info
+		sResult.DedupFingerprint = resp.Fingerprint.Digest
+	}
+	// De-duplication happens above, before an artifact is written. Folded
+	// responses therefore never create result files.
+	if len(s.config.OutputDirectory) > 0 {
+		resp.ResultFile = s.writeResultToFile(resp)
+		sResult.ResultFile = resp.ResultFile
+	}
 	s.resultMutex.Lock()
 	paused := s.paused
 	// Printed is the single source of truth for the pending count. Mark it under
@@ -442,6 +469,19 @@ func (s *Stdoutput) Result(resp ffuf.Response) {
 	// console would scroll the banner off screen.
 	if !paused {
 		s.PrintResult(sResult)
+	}
+}
+
+func (s *Stdoutput) emitDedupWarnings() {
+	if s.dedup == nil {
+		return
+	}
+	for _, warning := range s.dedup.Warnings() {
+		if s.config.Quiet {
+			fmt.Fprintf(os.Stderr, "%s\n", warning)
+		} else {
+			s.Warning(warning)
+		}
 	}
 }
 
@@ -549,6 +589,7 @@ func (s *Stdoutput) resultMultiline(res ffuf.Result) {
 	var res_hdr, res_str string
 	res_str = "%s%s    * %s: %s\n"
 	res_hdr = fmt.Sprintf("%s%s[Status: %d, Size: %d, Words: %d, Lines: %d, Duration: %dms]%s", s.stdoutClear(), s.colorize(res.StatusCode), res.StatusCode, res.ContentLength, res.ContentWords, res.ContentLines, res.Duration.Milliseconds(), s.ansiClear())
+	res_hdr += s.dedupSuffix(res)
 	reslines := ""
 	if s.config.Verbose {
 		reslines = fmt.Sprintf("%s%s| URL | %s\n", reslines, s.stdoutClear(), res.Url)
@@ -582,7 +623,22 @@ func (s *Stdoutput) resultMultiline(res ffuf.Result) {
 
 func (s *Stdoutput) resultNormal(res ffuf.Result) {
 	resnormal := fmt.Sprintf("%s%s%-23s [Status: %d, Size: %d, Words: %d, Lines: %d, Duration: %dms]%s", s.stdoutClear(), s.colorize(res.StatusCode), s.prepareInputsOneLine(res), res.StatusCode, res.ContentLength, res.ContentWords, res.ContentLines, res.Duration.Milliseconds(), s.ansiClear())
+	resnormal += s.dedupSuffix(res)
 	fmt.Println(resnormal)
+}
+
+func (s *Stdoutput) dedupSuffix(res ffuf.Result) string {
+	if res.Dedup == nil {
+		return ""
+	}
+	equivalent := "no"
+	if res.Dedup.Equivalent {
+		equivalent = "yes"
+		if len(res.Dedup.EquivalentRounds) > 0 {
+			equivalent += ":" + strings.Join(res.Dedup.EquivalentRounds, ",")
+		}
+	}
+	return fmt.Sprintf(" [Round: %s, Equivalent: %s]", res.Dedup.Round, equivalent)
 }
 
 func (s *Stdoutput) resultJson(res ffuf.Result) {

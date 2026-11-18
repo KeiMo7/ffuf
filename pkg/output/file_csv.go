@@ -5,11 +5,23 @@ import (
 	"encoding/csv"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/ffuf/ffuf/v2/pkg/ffuf"
 )
 
 var staticheaders = []string{"url", "redirectlocation", "position", "status_code", "content_length", "content_words", "content_lines", "content_type", "duration", "resultfile", "Ffufhash"}
+
+var dedupStaticheaders = append(append([]string{}, staticheaders...),
+	"dedup_round",
+	"dedup_equivalent",
+	"dedup_equivalent_rounds",
+	"dedup_folded_count",
+	"dedup_original_paths",
+	"dedup_fingerprint_source",
+	"dedup_fingerprint_valid",
+	"dedup_fingerprint_empty",
+)
 
 func writeCSV(filename string, config *ffuf.Config, res []ffuf.Result, encode bool) error {
 	header := make([]string, 0)
@@ -25,7 +37,11 @@ func writeCSV(filename string, config *ffuf.Config, res []ffuf.Result, encode bo
 	for _, inputprovider := range config.InputProviders {
 		header = append(header, inputprovider.Keyword)
 	}
-	header = append(header, staticheaders...)
+	if config.Dedup {
+		header = append(header, dedupStaticheaders...)
+	} else {
+		header = append(header, staticheaders...)
+	}
 
 	if err := w.Write(header); err != nil {
 		return err
@@ -39,12 +55,32 @@ func writeCSV(filename string, config *ffuf.Config, res []ffuf.Result, encode bo
 			r.Input = inputs
 		}
 
-		err := w.Write(toCSV(r))
+		row := toCSV(r)
+		if config.Dedup {
+			row = append(row, dedupCSVFields(r.Dedup)...)
+		}
+		err := w.Write(row)
 		if err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func dedupCSVFields(info *ffuf.DedupInfo) []string {
+	if info == nil {
+		return []string{"", "false", "", "0", "", "", "false", "false"}
+	}
+	return []string{
+		info.Round,
+		strconv.FormatBool(info.Equivalent),
+		strings.Join(info.EquivalentRounds, "|"),
+		strconv.Itoa(info.FoldedCount),
+		strings.Join(info.OriginalPaths, "|"),
+		info.FingerprintSource,
+		strconv.FormatBool(info.FingerprintValid),
+		strconv.FormatBool(info.FingerprintEmpty),
+	}
 }
 
 func base64encode(in []byte) string {

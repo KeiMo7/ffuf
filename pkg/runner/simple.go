@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/ffuf/ffuf/v2/pkg/ffuf"
+	"github.com/ffuf/ffuf/v2/pkg/fingerprint"
 
 	"github.com/andybalholm/brotli"
 )
@@ -238,12 +239,15 @@ func (r *SimpleRunner) Execute(req *ffuf.Request) (resp ffuf.Response, err error
 	resp = ffuf.NewResponse(httpresp, req)
 	defer httpresp.Body.Close()
 
+	declaredLength := int64(-1)
 	// Record the server-declared length first, so it is set before any early return
 	// below and the size filters still observe it.
 	if size, serr := strconv.Atoi(httpresp.Header.Get("Content-Length")); serr == nil {
+		declaredLength = int64(size)
 		resp.ContentLength = int64(size)
 		if size > MAX_DOWNLOAD_SIZE {
 			resp.Cancelled = true
+			resp.Fingerprint = unavailableFingerprint("response body was not read: size exceeds limit")
 			return resp, nil
 		}
 	}
@@ -253,7 +257,18 @@ func (r *SimpleRunner) Execute(req *ffuf.Request) (resp ffuf.Response, err error
 	// responses, which carry no Content-Length.
 	if r.config.IgnoreBody {
 		resp.Cancelled = true
+		resp.Fingerprint = unavailableFingerprint("response body was not read: -ignore-body")
 		return resp, nil
+	}
+
+	var fingerprintStream *fingerprint.Stream
+	if provider := r.config.FingerprintProvider; provider != nil {
+		redirect := resp.GetRedirectLocation(false)
+		if cached, ok := provider.Lookup(req.Method, req.Url, resp.StatusCode, declaredLength, redirect, httpresp.Header); ok {
+			resp.Fingerprint = cached
+		} else {
+			fingerprintStream = provider.NewStream()
+		}
 	}
 
 	// Bound the body at the source, before anything reads it. The Content-Length
@@ -297,17 +312,27 @@ func (r *SimpleRunner) Execute(req *ffuf.Request) (resp ffuf.Response, err error
 	// decompressing reader, so a decompression bomb only materialises
 	// MAX_DOWNLOAD_SIZE+1 bytes in memory instead of OOM-killing the process.
 	limited := io.LimitReader(bodyReader, int64(MAX_DOWNLOAD_SIZE)+1)
-	if respbody, rerr := io.ReadAll(limited); rerr == nil {
-		if len(respbody) > MAX_DOWNLOAD_SIZE {
-			// The snapshot taken above holds a body truncated at the cap, which would
-			// be written out as a well-formed response that merely looks complete.
-			// Drop it rather than store a misleading artifact.
-			resp.Raw = ""
-			resp.Cancelled = true
-			return resp, nil
-		}
+	respbody, rerr := readBodyLimited(limited, fingerprintStream)
+	if rerr != nil {
+		// Preserve the pre-existing matching behavior (no partial body is exposed
+		// to matchers), but make the read failure explicit so the result will never
+		// participate in de-duplication.
+		resp.BodyReadError = rerr.Error()
+		resp.Fingerprint = unavailableFingerprint("response body read failed: " + rerr.Error())
+	} else if len(respbody) > MAX_DOWNLOAD_SIZE {
+		// The snapshot taken above holds a body truncated at the cap, which would
+		// be written out as a well-formed response that merely looks complete.
+		// Drop it rather than store a misleading artifact.
+		resp.Raw = ""
+		resp.Cancelled = true
+		resp.Fingerprint = unavailableFingerprint("response body was not read: size exceeds limit")
+		return resp, nil
+	} else {
 		resp.ContentLength = int64(len(respbody))
 		resp.Data = respbody
+		if fingerprintStream != nil {
+			resp.Fingerprint = fingerprintStream.Finish()
+		}
 	}
 
 	// Count words and lines without materializing a []string. For a single-byte
@@ -323,6 +348,34 @@ func (r *SimpleRunner) Execute(req *ffuf.Request) (resp ffuf.Response, err error
 	resp.Timestamp = start.Add(firstByteTime)
 
 	return resp, nil
+}
+
+func unavailableFingerprint(reason string) fingerprint.Result {
+	return fingerprint.Result{Valid: false, Source: fingerprint.SourceUnavailable, Error: reason}
+}
+
+// readBodyLimited streams the body through the fingerprint accumulator while
+// retaining the same max+1 reading bound and error semantics as io.ReadAll on
+// the limited reader.
+func readBodyLimited(reader io.Reader, stream *fingerprint.Stream) ([]byte, error) {
+	buf := make([]byte, 32*1024)
+	out := make([]byte, 0, 32*1024)
+	for {
+		n, err := reader.Read(buf)
+		if n > 0 {
+			chunk := buf[:n]
+			out = append(out, chunk...)
+			if stream != nil {
+				_, _ = stream.Write(chunk)
+			}
+		}
+		if err == io.EOF {
+			return out, nil
+		}
+		if err != nil {
+			return out, err
+		}
+	}
 }
 
 // parsePreflightRequest reads a Burp-style raw HTTP request file and builds an

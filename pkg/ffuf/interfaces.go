@@ -2,6 +2,8 @@ package ffuf
 
 import (
 	"time"
+
+	"github.com/ffuf/ffuf/v2/pkg/fingerprint"
 )
 
 // MatcherManager provides functions for managing matchers and filters
@@ -105,6 +107,29 @@ type ScraperResult struct {
 	Results []string `json:"results"`
 }
 
+// FingerprintProvider supplies historical fingerprint reuse and bounded-memory
+// body fingerprint streams to the HTTP runner.
+type FingerprintProvider interface {
+	Lookup(method, url string, status, length int64, redirect string, headers map[string][]string) (fingerprint.Result, bool)
+	NewStream() *fingerprint.Stream
+}
+
+// DedupInfo is attached only when response de-duplication is enabled. Existing
+// result fields keep their order; this optional object is appended at the end.
+type DedupInfo struct {
+	Round             string   `json:"round"`
+	Equivalent        bool     `json:"equivalent"`
+	EquivalentRounds  []string `json:"equivalent_rounds,omitempty"`
+	FoldedCount       int      `json:"folded_count"`
+	OriginalPaths     []string `json:"original_paths"`
+	Fingerprint       string   `json:"fingerprint,omitempty"`
+	FingerprintSource string   `json:"fingerprint_source,omitempty"`
+	FingerprintValid  bool     `json:"fingerprint_valid"`
+	FingerprintEmpty  bool     `json:"fingerprint_empty"`
+	Sampled           bool     `json:"sampled,omitempty"`
+	UnavailableReason string   `json:"unavailable_reason,omitempty"`
+}
+
 type Result struct {
 	Input            map[string][]byte   `json:"input"`
 	Position         int                 `json:"position"`
@@ -126,4 +151,8 @@ type Result struct {
 	// so filtering a held result out of CurrentResults also drops it from the
 	// count. Not serialized to any output format.
 	Printed bool `json:"-"`
+	// Dedup is omitted from every existing format unless -dedup is enabled.
+	Dedup *DedupInfo `json:"dedup,omitempty"`
+	// DedupFingerprint links an in-flight result to its de-duplication group.
+	DedupFingerprint string `json:"-"`
 }

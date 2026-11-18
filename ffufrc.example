@@ -64,6 +64,12 @@
 
 [output]
     debuglog = "debug.log"
+    dedup = false
+    deduprules = "volatile.rules"
+    deduphistory = "/var/lib/ffuf/example-org.json"
+    dedupround = ""
+    dedupthreshold = 65536
+    dedupmaxentries = 100000
     outputdirectory = "/tmp/rawoutputdir"
     outputfile = "output.json"
     outputformat = "json"

@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/ffuf/ffuf/v2/pkg/fingerprint"
 )
 
 // Response struct holds the meaningful data returned from request and is meant for passing to filters
@@ -22,6 +24,10 @@ type Response struct {
 	ScraperData   map[string][]string
 	Duration      time.Duration
 	Timestamp     time.Time
+	// Fingerprint is populated by the runner when response de-duplication is
+	// enabled. Both fields are internal and stay out of audits and file formats.
+	Fingerprint   fingerprint.Result `json:"-"`
+	BodyReadError string             `json:"-"`
 }
 
 // GetRedirectLocation returns the redirect location for a 3xx redirect HTTP response

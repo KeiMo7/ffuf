@@ -4,6 +4,7 @@ import (
 	"html"
 	"html/template"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/ffuf/ffuf/v2/pkg/ffuf"
@@ -25,6 +26,7 @@ type htmlResult struct {
 	Host             string
 	HTMLColor        string
 	FfufHash         string
+	Dedup            *ffuf.DedupInfo
 }
 
 type htmlFileOutput struct {
@@ -168,6 +170,38 @@ const (
 	`
 )
 
+var htmlTemplateDedup = func() string {
+	t := htmlTemplate
+	t = strings.ReplaceAll(t, "|ScraperData|FfufHash|", "|ScraperData|FfufHash|DedupRound|DedupEquivalent|EquivalentRounds|FoldedCount|OriginalPaths|FingerprintSource|FingerprintValid|FingerprintEmpty|")
+	t = strings.Replace(t,
+		"              <th>Ffuf Hash</th>",
+		"              <th>Ffuf Hash</th>\n"+
+			"			  <th>Dedup round</th>\n"+
+			"			  <th>Dedup equivalent</th>\n"+
+			"			  <th>Equivalent rounds</th>\n"+
+			"			  <th>Folded count</th>\n"+
+			"			  <th>Original paths</th>\n"+
+			"			  <th>Fingerprint source</th>\n"+
+			"			  <th>Fingerprint valid</th>\n"+
+			"			  <th>Fingerprint empty</th>", 1)
+	t = strings.Replace(t,
+		"					<td>{{ $result.FfufHash }}</td>",
+		"					<td>{{ $result.FfufHash }}</td>\n"+
+			"					{{if $result.Dedup}}\n"+
+			"					<td>{{ $result.Dedup.Round }}</td>\n"+
+			"					<td>{{ $result.Dedup.Equivalent }}</td>\n"+
+			"					<td>{{ $result.Dedup.EquivalentRounds }}</td>\n"+
+			"					<td>{{ $result.Dedup.FoldedCount }}</td>\n"+
+			"					<td>{{ $result.Dedup.OriginalPaths }}</td>\n"+
+			"					<td>{{ $result.Dedup.FingerprintSource }}</td>\n"+
+			"					<td>{{ $result.Dedup.FingerprintValid }}</td>\n"+
+			"					<td>{{ $result.Dedup.FingerprintEmpty }}</td>\n"+
+			"					{{else}}\n"+
+			"					<td></td><td>false</td><td></td><td>0</td><td></td><td></td><td>false</td><td>false</td>\n"+
+			"					{{end}}", 1)
+	return t
+}()
+
 // colorizeResults returns a new slice with HTMLColor attribute
 func colorizeResults(results []ffuf.Result) []ffuf.Result {
 	newResults := make([]ffuf.Result, 0)
@@ -252,6 +286,7 @@ func writeHTML(filename string, config *ffuf.Config, results []ffuf.Result) erro
 			Host:             r.Host,
 			HTMLColor:        r.HTMLColor,
 			FfufHash:         ffufhash,
+			Dedup:            r.Dedup,
 		}
 		htmlResults = append(htmlResults, hres)
 	}
@@ -270,7 +305,11 @@ func writeHTML(filename string, config *ffuf.Config, results []ffuf.Result) erro
 
 	templateName := "output.html"
 	t := template.New(templateName).Delims("{{", "}}")
-	_, err = t.Parse(htmlTemplate)
+	templateBody := htmlTemplate
+	if config.Dedup {
+		templateBody = htmlTemplateDedup
+	}
+	_, err = t.Parse(templateBody)
 	if err != nil {
 		return err
 	}

@@ -88,6 +88,12 @@ INPUT OPTIONS:
 OUTPUT OPTIONS:
   -audit-log           Write audit log containing all requests, responses and config
   -debug-log           Write all of the internal logging to the specified file.
+  -dedup               Collapse results with equivalent normalized response bodies before writing output (default: false)
+  -dedup-history       Fingerprint history file used to compare scan rounds. Default: per-target file under the ffuf config directory
+  -dedup-max-entries   Maximum unique fingerprints retained per scan; zero selects the built-in limit (default: 0)
+  -dedup-round         Round label recorded in dedup output. Default: next numeric round from history
+  -dedup-rules         File of Go regular expressions, one per line, whose matches are ignored in response-body fingerprints
+  -dedup-threshold     Body bytes fingerprinted exactly before switching to bounded head/tail sampling; zero selects the built-in limit (default: 0)
   -o                   Write output to file
   -od                  Directory path to store matched results to.
   -of                  Output file format. Available formats: json, ejson, html, md, csv, ecsv (or, 'all' for all formats) (default: json)

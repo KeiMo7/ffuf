@@ -31,7 +31,7 @@ func TestRegisterFlags_Wellformed(t *testing.T) {
 
 	// The full expected flag surface. Unlike a bare count, this catches a net-zero
 	// add-and-remove, a rename, or a duplicate — update it DELIBERATELY when the CLI
-	// surface changes. 80 visible flags + 7 hidden compat (4 aliases + 3 dummies).
+	// surface changes.
 	expected := map[string]bool{
 		// HTTP
 		"H": true, "X": true, "b": true, "cc": true, "ck": true, "d": true,
@@ -56,6 +56,8 @@ func TestRegisterFlags_Wellformed(t *testing.T) {
 		"input-shell": true, "mode": true, "request": true, "request-proto": true, "w": true,
 		// Output
 		"audit-log": true, "debug-log": true, "o": true, "od": true, "of": true, "or": true,
+		"dedup": true, "dedup-round": true, "dedup-rules": true, "dedup-history": true,
+		"dedup-threshold": true, "dedup-max-entries": true,
 		// Compat aliases
 		"cookie": true, "data": true, "data-ascii": true, "data-binary": true,
 		// Compat dummies

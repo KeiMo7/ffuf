@@ -3,6 +3,8 @@ package ffuf
 import (
 	"context"
 	"regexp"
+
+	"github.com/ffuf/ffuf/v2/pkg/fingerprint"
 )
 
 // Sources a VarExtract can select a value from by name instead of by regex.
@@ -57,6 +59,13 @@ type Config struct {
 	Context                   context.Context       `json:"-"`
 	Data                      string                `json:"postdata"`
 	Debuglog                  string                `json:"debuglog"`
+	Dedup                     bool                  `json:"dedup,omitempty"`
+	DedupHistoryFile          string                `json:"dedup_history,omitempty"`
+	DedupMaxEntries           int                   `json:"dedup_max_entries,omitempty"`
+	DedupRound                string                `json:"dedup_round,omitempty"`
+	DedupRules                *fingerprint.Rules    `json:"-"`
+	DedupRulesFile            string                `json:"dedup_rules,omitempty"`
+	DedupThreshold            int                   `json:"dedup_threshold,omitempty"`
 	Delay                     optRange              `json:"delay"`
 	DirSearchCompat           bool                  `json:"dirsearch_compatibility"`
 	Encoders                  []string              `json:"encoders"`
@@ -111,6 +120,7 @@ type Config struct {
 	PreflightMode             string                `json:"preflight_mode"`
 	PreflightError            string                `json:"preflight_error"`
 	PreflightAnyHost          bool                  `json:"preflight_anyhost"`
+	FingerprintProvider       FingerprintProvider   `json:"-" toml:"-"`
 	// RateLimitFunc blocks until the shared rate limiter allows another request.
 	// The engine sets it so preflight/postflight requests (sent from the runner,
 	// outside the dispatch loop) also honor -rate and -p. Nil means unmetered.

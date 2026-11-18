@@ -260,6 +260,61 @@ EXAMPLE USAGE:
   More information and examples: https://github.com/ffuf/ffuf
 ```
 
+### Response de-duplication and scan rounds
+
+Enable de-duplication before output is written with:
+
+```
+ffuf -u https://example.org/FUZZ -w paths.txt -dedup \
+  -dedup-rules volatile.rules \
+  -dedup-history /var/lib/ffuf/example-org.json
+```
+
+The first result for a fingerprint is kept. Later results with the same
+normalized body are not added to the result list and do not create `-od` raw
+result files. Their URLs are recorded in the kept result's `dedup.original_paths`
+field and `dedup.folded_count`. Status code, length and redirect target are not
+part of the body fingerprint, so two different bodies with otherwise identical
+metadata remain separate.
+
+`volatile.rules` contains one Go regular expression per line. Blank lines and
+lines starting with `#` are ignored. Matches are replaced with stable
+`[ffuf-volatile:N]` markers before hashing:
+
+```
+# values that change on every response
+"timestamp":"[^"]+"
+"request_id":"[^"]+"
+"token":"[A-Za-z0-9_-]+"
+```
+
+Invalid expressions are rejected before scanning with `file:line:column` and the
+compiler error.
+
+The fingerprint is SHA-256 over the algorithm version, rules hash, threshold,
+raw body length, and normalized body. Bodies up to `-dedup-threshold` bytes
+(default 65536) are normalized exactly. Larger bodies use deterministic head and
+tail samples of half the threshold each, so fingerprint-owned memory stays
+O(threshold + one 32 KiB read chunk); response contents are never stored in the
+history or result map. `-dedup-max-entries` (default 100000) bounds the number of
+unique fingerprints and path lists retained in memory. Responses larger than the
+existing 5 MiB download cap, `-ignore-body`, and interrupted body reads are marked
+unavailable and are always kept as independent results.
+
+The history file is JSON and contains only metadata: algorithm/version, target,
+one entry per scan round, fingerprint-to-URL/status/length mappings, folded path
+lists, and a fingerprint cache keyed by URL plus a strong `ETag` or
+`Last-Modified` and declared length. A valid cache hit reuses the previous round's
+fingerprint without re-hashing the body. If history is malformed or belongs to a
+different target, ffuf warns and continues in single-round mode instead of
+exiting. Round labels default to the next number in the history; `-dedup-round`
+sets one explicitly.
+
+With de-duplication enabled, JSON records gain an optional trailing `dedup`
+object, CSV appends `dedup_*` columns, and Markdown/HTML append dedup columns.
+Existing fields and their order are unchanged. With `-dedup` omitted, all output
+formats use their original templates and field sets byte-for-byte.
+
 ### Interactive mode
 
 By pressing `ENTER` during ffuf execution, the process is paused and user is dropped to a shell-like interactive mode:

@@ -15,6 +15,8 @@ import (
 	"strings"
 
 	"github.com/pelletier/go-toml"
+
+	"github.com/ffuf/ffuf/v2/pkg/fingerprint"
 )
 
 type ConfigOptions struct {
@@ -105,6 +107,12 @@ type InputOptions struct {
 type OutputOptions struct {
 	AuditLog            string `json:"audit_log" ffuf:"audit-log" section:"output" usage:"Write audit log containing all requests, responses and config"`
 	DebugLog            string `json:"debug_log" ffuf:"debug-log" section:"output" usage:"Write all of the internal logging to the specified file."`
+	Dedup               bool   `json:"dedup,omitempty" toml:"dedup" ffuf:"dedup" section:"output" usage:"Collapse results with equivalent normalized response bodies before writing output"`
+	DedupHistory        string `json:"dedup_history,omitempty" toml:"deduphistory" ffuf:"dedup-history" section:"output" usage:"Fingerprint history file used to compare scan rounds. Default: per-target file under the ffuf config directory"`
+	DedupMaxEntries     int    `json:"dedup_max_entries,omitempty" toml:"dedupmaxentries" ffuf:"dedup-max-entries" section:"output" usage:"Maximum unique fingerprints retained per scan; zero selects the built-in limit"`
+	DedupRound          string `json:"dedup_round,omitempty" toml:"dedupround" ffuf:"dedup-round" section:"output" usage:"Round label recorded in dedup output. Default: next numeric round from history"`
+	DedupRules          string `json:"dedup_rules,omitempty" toml:"deduprules" ffuf:"dedup-rules" section:"output" usage:"File of Go regular expressions, one per line, whose matches are ignored in response-body fingerprints"`
+	DedupThreshold      int    `json:"dedup_threshold,omitempty" toml:"dedupthreshold" ffuf:"dedup-threshold" section:"output" usage:"Body bytes fingerprinted exactly before switching to bounded head/tail sampling; zero selects the built-in limit"`
 	OutputDirectory     string `json:"output_directory" ffuf:"od" section:"output" usage:"Directory path to store matched results to."`
 	OutputFile          string `json:"output_file" ffuf:"o" section:"output" usage:"Write output to file"`
 	OutputFormat        string `json:"output_format" ffuf:"of" section:"output" usage:"Output file format. Available formats: json, ejson, html, md, csv, ecsv (or, 'all' for all formats)"`
@@ -563,6 +571,12 @@ func ConfigFromOptions(parseOpts *ConfigOptions, ctx context.Context, cancel con
 
 	conf.InputShell = parseOpts.Input.InputShell
 	conf.AuditLog = parseOpts.Output.AuditLog
+	conf.Dedup = parseOpts.Output.Dedup
+	conf.DedupHistoryFile = parseOpts.Output.DedupHistory
+	conf.DedupMaxEntries = parseOpts.Output.DedupMaxEntries
+	conf.DedupRound = parseOpts.Output.DedupRound
+	conf.DedupRulesFile = parseOpts.Output.DedupRules
+	conf.DedupThreshold = parseOpts.Output.DedupThreshold
 	conf.OutputFile = parseOpts.Output.OutputFile
 	conf.OutputDirectory = parseOpts.Output.OutputDirectory
 	conf.OutputSkipEmptyFile = parseOpts.Output.OutputSkipEmptyFile
@@ -592,6 +606,26 @@ func ConfigFromOptions(parseOpts *ConfigOptions, ctx context.Context, cancel con
 	conf.PreflightAnyHost = parseOpts.HTTP.PreflightAnyHost
 	conf.Preflights = parseOpts.HTTP.Preflights
 	conf.Postflights = parseOpts.HTTP.Postflights
+
+	if conf.DedupThreshold < 0 {
+		errs.Add(fmt.Errorf("-dedup-threshold must be >= 0, got %d", conf.DedupThreshold))
+	}
+	if conf.DedupMaxEntries < 0 {
+		errs.Add(fmt.Errorf("-dedup-max-entries must be >= 0, got %d", conf.DedupMaxEntries))
+	}
+	if conf.DedupRulesFile != "" {
+		rules, rerr := fingerprint.LoadRules(conf.DedupRulesFile)
+		if rerr != nil {
+			errs.Add(rerr)
+		} else {
+			conf.DedupRules = rules
+		}
+	}
+	if conf.Dedup {
+		if conf.DedupRules == nil {
+			conf.DedupRules = fingerprint.EmptyRules()
+		}
+	}
 
 	switch parseOpts.HTTP.PreflightMode {
 	case "", "per-request":
