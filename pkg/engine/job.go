@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ffuf/ffuf/v2/pkg/ffuf"
+	"github.com/ffuf/ffuf/v2/pkg/verdict"
 )
 
 // Job ties together Config, Runner, Input and Output
@@ -40,6 +41,11 @@ type Job struct {
 	Jobhash      string
 	Total        int
 	Rate         *RateThrottle
+
+	// verdict is the attributed-decision harness. Nil unless an ordered rule
+	// set was loaded; when nil every request takes the legacy isMatch path and
+	// no review allocation happens.
+	verdict *verdictHarness
 
 	queue     *jobQueue
 	recursion *recursionManager
@@ -78,6 +84,9 @@ func NewJob(conf *ffuf.Config) *Job {
 	j.Config = conf
 	j.queue = newJobQueue()
 	j.Rate = NewRateThrottle(conf)
+	// Wire the attributed-decision harness once, up front. It stays nil when
+	// no ordered rule set was configured, leaving the legacy path untouched.
+	j.verdict = newVerdictHarness(conf)
 	// Let the runner meter preflight/postflight requests against the same rate
 	// limiter as the main dispatch loop, so -rate/-p bound total outgoing volume
 	// rather than only the fuzzing requests.
@@ -206,6 +215,32 @@ func (j *Job) Start() {
 	if err != nil {
 		j.Output.Error(err.Error())
 	}
+	j.finalizeReview()
+}
+
+// finalizeReview closes the review sink and reports the bounded-store
+// accounting. It writes to stderr only, so enabling review never changes a
+// byte of the result stream on stdout. A sink that could not be used is
+// reported as degraded but never fails the run.
+func (j *Job) finalizeReview() {
+	if j.verdict == nil || j.verdict.ReviewStore() == nil {
+		return
+	}
+	store := j.verdict.ReviewStore()
+	stats := store.Stats()
+	if err := store.Close(); err != nil {
+		j.Output.Warning(fmt.Sprintf("Review file sink unavailable: %s (in-memory review retained)", err))
+	}
+	sinkNote := ""
+	if stats.SinkDisabled || stats.SinkFailures > 0 {
+		sinkNote = fmt.Sprintf(", %d sink write failure(s)", stats.SinkFailures)
+		if stats.SinkError != "" {
+			sinkNote += ": " + stats.SinkError
+		}
+	}
+	j.Output.Info(fmt.Sprintf(
+		"Review: %d record(s) retained (capacity %d), %d recorded total, %d evicted (FIFO)%s",
+		stats.Stored, stats.Capacity, stats.TotalRecorded, stats.Evicted, sinkNote))
 }
 
 // Reset resets the counters and wordlist position for a job
@@ -436,10 +471,46 @@ func (j *Job) updateProgress() {
 	j.Output.Progress(prog)
 }
 
+// RefreshVerdict (re)builds the attributed-decision harness from the current
+// Config. Called by the assembly after it loads the rule book/review store,
+// since NewJob runs before those are assigned.
+func (j *Job) RefreshVerdict() {
+	j.verdict = newVerdictHarness(j.Config)
+}
+
 // isMatch delegates the match/filter decision to the MatcherManager seam, adapting
 // the Config fields it needs. The logic itself now lives in filter.MatcherManager.
 func (j *Job) isMatch(resp ffuf.Response) bool {
 	return j.Config.MatcherManager.Matches(&resp, j.Config.AutoCalibrationPerHost, j.Config.MatcherMode, j.Config.FilterMode)
+}
+
+// decide is the single decision entry point for one response. When an ordered
+// attributed rule set is active it evaluates that set (with full attribution),
+// records any review entry, and returns whether the response should be emitted.
+// Otherwise it falls through to the legacy boolean isMatch path — so with no
+// rule set configured the behavior is exactly as it was before this feature.
+//
+// The rule snapshot is taken per call, so a request's conclusion depends only
+// on the rules present in its own evaluation round, never on a mid-flight
+// mutation.
+func (j *Job) decide(resp *ffuf.Response) bool {
+	if j.verdict == nil {
+		return j.isMatch(*resp)
+	}
+	host := ffuf.HostURLFromRequest(*resp.Request)
+	snap := j.verdict.book.SnapshotForHost(host)
+	decision := j.verdict.evaluator.Evaluate(resp, snap)
+
+	keep := decision.Kept(j.Config.ReviewKeepUndec)
+	// Review captures every non-firm-match response: all drops and all
+	// undecidable verdicts (including an undecidable response the keep-policy
+	// still emits, so its attribution is not lost). An ordinary firm keep is
+	// not buffered — those already go to the normal result output.
+	if j.verdict.review != nil && (decision.Outcome == verdict.OutcomeDrop ||
+		decision.Outcome == verdict.OutcomeUndecidable) {
+		j.verdict.review.Record(resp, decision)
+	}
+	return keep
 }
 
 func (j *Job) ffufHash(pos int) []byte {
@@ -541,15 +612,17 @@ func (j *Job) runTask(ctx jobContext, input map[string][]byte, position int, ret
 	// Handle autocalibration, must be done after the actual request to ensure sane value in req.Host
 	_ = j.CalibrateIfNeeded(ffuf.HostURLFromRequest(req), input)
 
-	// Handle scraper actions
+	// Handle scraper actions. decide() is the single decision seam: it runs
+	// the attributed rule set when one is loaded, else the legacy boolean path.
+	matched := j.decide(&resp)
 	if j.Scraper != nil {
-		for _, sres := range j.Scraper.Execute(&resp, j.isMatch(resp)) {
+		for _, sres := range j.Scraper.Execute(&resp, matched) {
 			resp.ScraperData[sres.Name] = sres.Results
 			j.handleScraperResult(&resp, sres)
 		}
 	}
 
-	if j.isMatch(resp) {
+	if matched {
 		// Re-send request through replay-proxy if needed
 		if j.ReplayRunner != nil {
 			replayreq, err := j.ReplayRunner.Prepare(input, &basereq)

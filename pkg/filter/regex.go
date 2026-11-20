@@ -45,7 +45,11 @@ func (f *RegexpFilter) Filter(response *ffuf.Response) (bool, error) {
 	}
 	matched, err := regexp.Match(pattern, matchdata)
 	if err != nil {
-		return false, nil
+		// Propagate the error instead of swallowing it as a silent "no match".
+		// The legacy MatcherManager treats an errored rule as non-participating
+		// (unchanged behavior), while the attributed verdict path records it as
+		// an undecidable rule with the reason in the trace.
+		return false, fmt.Errorf("regexp matcher/filter could not evaluate pattern %q: %s", pattern, err)
 	}
 	return matched, nil
 }

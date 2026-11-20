@@ -68,6 +68,14 @@
     outputfile = "output.json"
     outputformat = "json"
     outputcreateemptyfile = false
+    # Attributed decisions (all opt-in; unset = legacy boolean match path).
+    # rule_set points at a TOML file of ordered [[rules]] (see -rules help).
+    rule_set = ""
+    review_enabled = false
+    review_capacity = 1000
+    review_file = ""
+    review_keep_undecidable = false
+    rule_eval_timeout_ms = 0
 
 [filter]
     mode = "or"

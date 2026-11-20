@@ -109,6 +109,14 @@ type OutputOptions struct {
 	OutputFile          string `json:"output_file" ffuf:"o" section:"output" usage:"Write output to file"`
 	OutputFormat        string `json:"output_format" ffuf:"of" section:"output" usage:"Output file format. Available formats: json, ejson, html, md, csv, ecsv (or, 'all' for all formats)"`
 	OutputSkipEmptyFile bool   `json:"output_skip_empty" ffuf:"or" section:"output" usage:"Don't create the output file if we don't have results"`
+	// Attributed decision (verdict) options. All default to off, so without
+	// them ffuf runs the legacy boolean match path with byte-identical output.
+	RuleSet         string `json:"rule_set" toml:"rule_set" ffuf:"rules" section:"output" usage:"Load an ordered, attributed rule set from a TOML file (matchers/filters with stable IDs and priority). Off by default; when unset the legacy -mc/-fs rules are used."`
+	ReviewEnabled   bool   `json:"review_enabled" toml:"review_enabled" ffuf:"review" section:"output" usage:"Retain an attributed review record (rule, raw expression, actual values) for every dropped/undecidable response in a bounded in-memory buffer. No effect without -rules."`
+	ReviewCapacity  int    `json:"review_capacity" toml:"review_capacity" ffuf:"review-cap" section:"output" usage:"Maximum number of review records retained in memory; overflow evicts oldest first (FIFO). Default 1000."`
+	ReviewFile      string `json:"review_file" toml:"review_file" ffuf:"review-file" section:"output" usage:"Append every review record as one JSON line to this file, in addition to the bounded in-memory buffer."`
+	ReviewKeepUndec bool   `json:"review_keep_undecidable" toml:"review_keep_undecidable" ffuf:"review-keep-undecidable" section:"output" usage:"When a response cannot be decided (missing/truncated value, rule error or timeout), keep and print it as a result instead of holding it back. It is still marked undecidable in the review records."`
+	RuleEvalTimeout int    `json:"rule_eval_timeout_ms" toml:"rule_eval_timeout_ms" ffuf:"rule-timeout" section:"output" usage:"Per-rule evaluation timeout in milliseconds. A rule that exceeds it is recorded undecidable and the other rules proceed. 0 disables the timeout (default)."`
 }
 
 type FilterOptions struct {
@@ -201,6 +209,12 @@ func NewConfigOptions() *ConfigOptions {
 	c.Output.OutputFile = ""
 	c.Output.OutputFormat = "json"
 	c.Output.OutputSkipEmptyFile = false
+	c.Output.RuleSet = ""
+	c.Output.ReviewEnabled = false
+	c.Output.ReviewCapacity = 1000
+	c.Output.ReviewFile = ""
+	c.Output.ReviewKeepUndec = false
+	c.Output.RuleEvalTimeout = 0
 	return c
 }
 
@@ -592,6 +606,32 @@ func ConfigFromOptions(parseOpts *ConfigOptions, ctx context.Context, cancel con
 	conf.PreflightAnyHost = parseOpts.HTTP.PreflightAnyHost
 	conf.Preflights = parseOpts.HTTP.Preflights
 	conf.Postflights = parseOpts.HTTP.Postflights
+
+	// Attributed decision options. Validation only here: the rule file itself
+	// is loaded by the engine wiring (main/assembly), since pkg/ffuf must not
+	// import the verdict package.
+	conf.ReviewEnabled = parseOpts.Output.ReviewEnabled
+	conf.ReviewCapacity = parseOpts.Output.ReviewCapacity
+	conf.ReviewFile = parseOpts.Output.ReviewFile
+	conf.ReviewKeepUndec = parseOpts.Output.ReviewKeepUndec
+	conf.RuleEvalTimeoutMS = parseOpts.Output.RuleEvalTimeout
+	if parseOpts.Output.RuleEvalTimeout < 0 {
+		errs.Add(fmt.Errorf("Rule evaluation timeout (-rule-timeout) must be zero or a positive number of milliseconds, got %d",
+			parseOpts.Output.RuleEvalTimeout))
+	}
+	if parseOpts.Output.ReviewCapacity < 0 {
+		errs.Add(fmt.Errorf("Review capacity (-review-cap) must be zero or positive, got %d",
+			parseOpts.Output.ReviewCapacity))
+	}
+	if parseOpts.Output.ReviewEnabled && parseOpts.Output.RuleSet == "" {
+		errs.Add(fmt.Errorf("-review requires an ordered rule set loaded with -rules; without -rules the legacy match path carries no per-rule attribution"))
+	}
+	if parseOpts.Output.ReviewFile != "" && parseOpts.Output.RuleSet == "" {
+		errs.Add(fmt.Errorf("-review-file requires an ordered rule set loaded with -rules"))
+	}
+	if parseOpts.Output.RuleSet != "" && !FileExists(parseOpts.Output.RuleSet) {
+		errs.Add(fmt.Errorf("rule set file (-rules) not found: %s", parseOpts.Output.RuleSet))
+	}
 
 	switch parseOpts.HTTP.PreflightMode {
 	case "", "per-request":

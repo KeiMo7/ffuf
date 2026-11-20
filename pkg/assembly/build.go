@@ -14,6 +14,7 @@ import (
 	"github.com/ffuf/ffuf/v2/pkg/output"
 	"github.com/ffuf/ffuf/v2/pkg/runner"
 	"github.com/ffuf/ffuf/v2/pkg/scraper"
+	"github.com/ffuf/ffuf/v2/pkg/verdict"
 )
 
 // BuildJob constructs and wires a Job from conf. It is the single source of truth
@@ -24,7 +25,37 @@ func BuildJob(conf *ffuf.Config) (*engine.Job, error) {
 	job := engine.NewJob(conf)
 	var errs ffuf.Multierror
 
-	job.Input, errs = input.NewInputProvider(conf)
+	// Optional attributed rule set. A load failure is a hard startup error; the
+	// loader accumulates every rule problem and reports them in one pass. This
+	// is fully specified by the Config (unlike the CLI-defaulted matchers), so it
+	// can live in the shared assembly path and be exercised by integration tests.
+	if conf.Options != nil && conf.Options.Output.RuleSet != "" {
+		book, loadErr := verdict.LoadRuleFile(conf.Options.Output.RuleSet)
+		if loadErr != nil {
+			errs.Add(loadErr)
+		} else {
+			conf.RuleBook = book
+			if conf.ReviewEnabled {
+				capacity := conf.ReviewCapacity
+				if capacity < 1 {
+					capacity = 1000
+				}
+				conf.ReviewStore = verdict.NewReviewStore(capacity, conf.ReviewFile)
+			}
+			// NewJob ran before the book/store were assigned, so (re)build the
+			// harness once the Config carries them.
+			job.RefreshVerdict()
+		}
+	}
+
+	// Input errors go into their own Multierror. Assigning NewInputProvider's
+	// second return straight back into errs would replace the rule-set errors
+	// accumulated above and silently swallow them.
+	var inputErrs ffuf.Multierror
+	job.Input, inputErrs = input.NewInputProvider(conf)
+	if inputErrs.ErrorOrNil() != nil {
+		errs.Add(inputErrs.ErrorOrNil())
+	}
 
 	// Only the http (SimpleRunner) runner exists today.
 	job.Runner = runner.NewSimpleRunner(conf, false)

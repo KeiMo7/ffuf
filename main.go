@@ -122,6 +122,8 @@ func main() {
 		defer job.AuditLogger.Close()
 	}
 	if err != nil {
+		// Includes attributed rule-set load/validation failures: every rule
+		// problem is reported here, at startup, before any request is sent.
 		fmt.Fprintf(os.Stderr, "Encountered error(s): %s\n", err)
 		Usage()
 		fmt.Fprintf(os.Stderr, "Encountered error(s): %s\n", err)

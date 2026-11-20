@@ -111,6 +111,19 @@ type Config struct {
 	PreflightMode             string                `json:"preflight_mode"`
 	PreflightError            string                `json:"preflight_error"`
 	PreflightAnyHost          bool                  `json:"preflight_anyhost"`
+	// Attributed decision (verdict) configuration. RuleBook is non-nil only
+	// when an ordered rule set was loaded; otherwise the engine uses the legacy
+	// MatcherManager path and all observable behavior is unchanged. ReviewStore
+	// is non-nil only when review was explicitly enabled. All fields are
+	// json:"-" so they never alter the Config's serialized golden form; the
+	// source options they derive from live on Config.Options.
+	RuleBook          interface{} `json:"-" toml:"-"` // *verdict.RuleBook, kept as interface to avoid an import cycle
+	ReviewStore       interface{} `json:"-" toml:"-"` // *verdict.ReviewStore
+	ReviewEnabled     bool        `json:"-" toml:"-"`
+	ReviewCapacity    int         `json:"-" toml:"-"`
+	ReviewFile        string      `json:"-" toml:"-"`
+	ReviewKeepUndec   bool        `json:"-" toml:"-"`
+	RuleEvalTimeoutMS int         `json:"-" toml:"-"`
 	// RateLimitFunc blocks until the shared rate limiter allows another request.
 	// The engine sets it so preflight/postflight requests (sent from the runner,
 	// outside the dispatch loop) also honor -rate and -p. Nil means unmetered.
