@@ -6,12 +6,14 @@ import (
 	"math/rand"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/ffuf/ffuf/v2/pkg/ffuf"
+	"github.com/ffuf/ffuf/v2/pkg/heuristics"
 )
 
 // Job ties together Config, Runner, Input and Output
@@ -40,6 +42,16 @@ type Job struct {
 	Jobhash      string
 	Total        int
 	Rate         *RateThrottle
+
+	// Optional multi-dimensional decision layer. Nil unless -heuristics is
+	// enabled; every call site nil-checks it so legacy runs are unchanged.
+	Decider DecisionProvider
+	// Checkpoint persists progress for interrupt/resume. Nil unless -checkpoint
+	// is configured.
+	Checkpoint CheckpointStore
+	// Evidence records per-request verdicts (including non-matches). Nil unless
+	// -evidence-log is configured.
+	Evidence EvidenceRecorder
 
 	queue     *jobQueue
 	recursion *recursionManager
@@ -189,10 +201,16 @@ func (j *Job) Start() {
 
 	j.setRunning(true)
 	j.setRunningJob(true)
-	//Show banner if not running in silent mode
+	// Show banner if not running in silent mode
 	if !j.Config.Quiet {
 		j.Output.Banner()
 	}
+	// Resume: re-surface hits collected in a previous run before dispatching any
+	// new requests, so the output set is identical to a single uninterrupted run.
+	j.resurfacePriorMatches()
+	// Periodic durable flush of checkpoint + evidence.
+	stopFlush := j.startFlushLoop()
+	defer stopFlush()
 	// Monitor for SIGTERM and do cleanup properly (writing the output files etc)
 	j.interruptMonitor()
 	for j.jobsInQueue() {
@@ -354,10 +372,6 @@ func (j *Job) startExecution(ctx jobContext) {
 			break
 		}
 		j.pauseCheckpoint()
-		// Handle the rate & thread limiting
-		threadlimiter <- true
-		// Ratelimiter handles the rate ticker
-		<-j.Rate.RateLimiter.C
 
 		j.inputMutex.Lock()
 		nextInput := j.Input.Value()
@@ -365,6 +379,23 @@ func (j *Job) startExecution(ctx jobContext) {
 		j.inputMutex.Unlock()
 		// Add FFUFHASH and its value
 		nextInput["FFUFHASH"] = j.ffufHash(nextPosition)
+
+		// Resume support: an entry completed in a previous run is skipped without
+		// sending another request. Its prior match (if any) was already re-surfaced
+		// once when the Job started, so it is not printed again here. This check
+		// MUST run before acquiring a thread-limiter slot: a skipped entry never
+		// starts a worker and therefore never releases a slot, so acquiring first
+		// deadlocks the dispatch loop once the skipped entries fill the limiter.
+		// The counter still advances to terminate the background progress goroutine.
+		if j.Checkpoint != nil && j.Checkpoint.IsDone(nextPosition, stringInputs(nextInput)) {
+			j.incCounter()
+			continue
+		}
+
+		// Handle the rate & thread limiting only for entries that actually run.
+		threadlimiter <- true
+		// Ratelimiter handles the rate ticker
+		<-j.Rate.RateLimiter.C
 
 		wg.Add(1)
 		j.incCounter()
@@ -488,6 +519,9 @@ func (j *Job) runTask(ctx jobContext, input map[string][]byte, position int, ret
 		}
 		j.incError()
 		log.Printf("%s", err)
+		// Terminal failure after exhausting retries: record the entry as done so a
+		// resume does not endlessly re-attempt a request that cannot succeed.
+		j.recordCheckpoint(req, ffuf.Response{}, false, nil, err.Error())
 		if os.IsTimeout(err) {
 			for name := range j.Config.MatcherManager.GetMatchers() {
 				if name == "time" {
@@ -541,15 +575,34 @@ func (j *Job) runTask(ctx jobContext, input map[string][]byte, position int, ret
 	// Handle autocalibration, must be done after the actual request to ensure sane value in req.Host
 	_ = j.CalibrateIfNeeded(ffuf.HostURLFromRequest(req), input)
 
+	// Multi-dimensional decision layer. When enabled, the legacy MatcherManager
+	// verdict is computed first and passed in: the engine guarantees rule tuning
+	// never removes a hit the legacy rules would report. When disabled, the
+	// legacy boolean is the whole decision exactly as before.
+	legacyMatch := j.isMatch(resp)
+	var verdict *heuristics.Verdict
+	hit := legacyMatch
+	if j.Decider != nil {
+		if err := j.Decider.EnsureBaseline(urlPathOf(req.Url)); err != nil {
+			j.Output.Warning(fmt.Sprintf("baseline collection degraded, falling back to status codes for this group: %s", err))
+		}
+		v := j.Decider.Evaluate(&resp, legacyMatch)
+		verdict = &v
+		hit = v.Hit
+	}
+
+	j.recordEvidence(req, resp, legacyMatch, verdict)
+	j.recordCheckpoint(req, resp, legacyMatch, verdict, "")
+
 	// Handle scraper actions
 	if j.Scraper != nil {
-		for _, sres := range j.Scraper.Execute(&resp, j.isMatch(resp)) {
+		for _, sres := range j.Scraper.Execute(&resp, hit) {
 			resp.ScraperData[sres.Name] = sres.Results
 			j.handleScraperResult(&resp, sres)
 		}
 	}
 
-	if j.isMatch(resp) {
+	if hit {
 		// Re-send request through replay-proxy if needed
 		if j.ReplayRunner != nil {
 			replayreq, err := j.ReplayRunner.Prepare(input, &basereq)
@@ -561,6 +614,10 @@ func (j *Job) runTask(ctx jobContext, input map[string][]byte, position int, ret
 			} else {
 				_, _ = j.ReplayRunner.Execute(&replayreq)
 			}
+		}
+		if verdict != nil {
+			// Make the reason available in the result stream for reviewers.
+			j.Output.Info(fmt.Sprintf("HIT %s [%s] %s", req.Url, verdict.Group, strings.Join(verdict.Reasons, "; ")))
 		}
 		j.Output.Result(resp)
 

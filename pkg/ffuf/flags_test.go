@@ -27,6 +27,7 @@ func TestRegisterFlags_Wellformed(t *testing.T) {
 	validSection := map[string]bool{
 		SectionHTTP: true, SectionGeneral: true, SectionCompat: true, SectionMatcher: true,
 		SectionFilter: true, SectionInput: true, SectionOutput: true,
+		SectionHeuristics: true, SectionResume: true,
 	}
 
 	// The full expected flag surface. Unlike a bare count, this catches a net-zero
@@ -56,6 +57,14 @@ func TestRegisterFlags_Wellformed(t *testing.T) {
 		"input-shell": true, "mode": true, "request": true, "request-proto": true, "w": true,
 		// Output
 		"audit-log": true, "debug-log": true, "o": true, "od": true, "of": true, "or": true,
+		// Heuristics (multi-dimensional decision engine)
+		"heuristics": true, "heur-length": true, "heur-length-floor": true,
+		"heur-sim": true, "heur-sim-timeout": true, "heur-time": true, "heur-score": true,
+		"heur-baseline-samples": true, "heur-no-prewarm": true,
+		"suppressors": true, "labels": true,
+		// Resume / evidence
+		"checkpoint": true, "checkpoint-flush": true, "checkpoint-reset": true,
+		"evidence-log": true, "eval-report": true,
 		// Compat aliases
 		"cookie": true, "data": true, "data-ascii": true, "data-binary": true,
 		// Compat dummies

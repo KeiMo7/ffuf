@@ -194,6 +194,31 @@ func (i *interactive) handleInput(in []byte) {
 					i.Job.Rate.ChangeRate(newrate)
 				}
 			}
+		case "fp":
+			// Mark a reported result as a false positive. Its body-hash
+			// signature is recorded so later responses with the same normalized
+			// content are auto-suppressed (continuous tuning).
+			if i.Job.Decider == nil {
+				i.Job.Output.Error("False-positive marking requires -heuristics")
+			} else if len(args) < 2 {
+				i.Job.Output.Error("Please define the result position to mark, e.g. \"fp 17\" (see \"show\")")
+			} else if len(args) > 2 {
+				i.Job.Output.Error("Too many arguments for \"fp\"")
+			} else {
+				i.markFalsePositive(args[1])
+			}
+		case "fplist":
+			i.listSuppressors()
+		case "fprm":
+			if len(args) != 2 {
+				i.Job.Output.Error("Usage: fprm <signature-id> (see \"fplist\")")
+			} else if i.Job.Decider == nil {
+				i.Job.Output.Error("False-positive marking requires -heuristics")
+			} else if i.Job.Decider.Engine().RemoveSuppressor(args[1]) {
+				i.Job.Output.Info("Suppressor " + args[1] + " removed")
+			} else {
+				i.Job.Output.Error("No such suppressor: " + args[1])
+			}
 
 		default:
 			if i.paused {
@@ -342,6 +367,9 @@ available commands:
  queueshow                - show job queue
  queuedel [number]        - delete a job in the queue
  queueskip                - advance to the next queued job
+ fp [position]            - mark a result as false positive; its content signature is auto-suppressed later
+ fplist                   - list recorded false-positive signatures
+ fprm [id]                - remove a false-positive signature
  restart                  - restart and resume the current ffuf job
  resume                   - resume current ffuf job (or: ENTER) 
  show                     - show results for the current job
@@ -349,4 +377,65 @@ available commands:
  help                     - you are looking at it
 `
 	i.Job.Output.Raw(fmt.Sprintf(help, fc, fc, fl, fl, fw, fw, fs, fs, ft, ft, rate))
+}
+
+// markFalsePositive records a suppressor from a result shown by "show". The
+// result's position is the stable key: the checkpoint retains the verdict and
+// body hash recorded for it. When no checkpoint is active the current result
+// set still carries the URL, and the signature is built from any matching
+// current result by position.
+func (i *interactive) markFalsePositive(posArg string) {
+	pos, err := strconv.Atoi(posArg)
+	if err != nil {
+		i.Job.Output.Error(fmt.Sprintf("Not a number: %s", posArg))
+		return
+	}
+	var bodyHash, group, sampleURL string
+	var statusCode int64
+	if i.Job.Checkpoint != nil {
+		if e, ok := i.Job.Checkpoint.EntryAtPosition(pos); ok {
+			bodyHash = e.Signature.BodyHash
+			statusCode = e.Signature.StatusCode
+			sampleURL = e.Signature.URL
+			if e.Verdict != nil {
+				group = e.Verdict.Group
+			}
+		}
+	}
+	if bodyHash == "" {
+		// Fall back to the live result set (no checkpoint, or entry not yet flushed).
+		for _, r := range i.Job.Output.GetCurrentResults() {
+			if r.Position == pos {
+				statusCode = r.StatusCode
+				sampleURL = r.Url
+				break
+			}
+		}
+	}
+	if bodyHash == "" {
+		i.Job.Output.Error(fmt.Sprintf("No recorded response at position %d (tip: use \"show\" to list positions)", pos))
+		return
+	}
+	id, ok := i.Job.SuppressFalsePositive(bodyHash, statusCode, group, sampleURL, "interactive fp mark")
+	if !ok {
+		i.Job.Output.Error("Could not record suppressor (decision layer inactive)")
+		return
+	}
+	i.Job.Output.Info(fmt.Sprintf("False-positive signature %s recorded; similar responses will be suppressed going forward", id))
+}
+
+func (i *interactive) listSuppressors() {
+	if i.Job.Decider == nil {
+		i.Job.Output.Error("False-positive marking requires -heuristics")
+		return
+	}
+	sup := i.Job.Decider.Engine().Suppressors()
+	if len(sup) == 0 {
+		i.Job.Output.Info("No false-positive signatures recorded")
+		return
+	}
+	for _, s := range sup {
+		i.Job.Output.Raw(fmt.Sprintf(" %s  status=%d group=%s hash=%s hits=%d %s\n",
+			s.ID, s.StatusCode, s.Group, s.BodyHash, s.HitCount, s.SampleURL))
+	}
 }

@@ -58,6 +58,8 @@ func Usage() {
 		{Name: "FILTER OPTIONS", Description: "Filters for the response filtering.", Flags: make([]UsageFlag, 0), Hidden: false, Key: ffuf.SectionFilter},
 		{Name: "INPUT OPTIONS", Description: "Options for input data for fuzzing. Wordlists and input generators.", Flags: make([]UsageFlag, 0), Hidden: false, Key: ffuf.SectionInput},
 		{Name: "OUTPUT OPTIONS", Description: "Options for output. Output file formats, file names and debug file locations.", Flags: make([]UsageFlag, 0), Hidden: false, Key: ffuf.SectionOutput},
+		{Name: "HEURISTIC OPTIONS", Description: "Multi-dimensional hit determination: status, length, timing and content similarity against per-extension baselines, with explainable verdicts. Off by default; legacy status matching is never downgraded.", Flags: make([]UsageFlag, 0), Hidden: false, Key: ffuf.SectionHeuristics},
+		{Name: "RESUME / EVIDENCE OPTIONS", Description: "Durable progress (interrupt and resume), per-request evidence logs and evaluation reports.", Flags: make([]UsageFlag, 0), Hidden: false, Key: ffuf.SectionResume},
 	}
 	byKey := make(map[string]int, len(sections))
 	for i, s := range sections {

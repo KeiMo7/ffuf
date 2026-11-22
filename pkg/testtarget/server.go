@@ -199,6 +199,55 @@ func (t *Target) handle(w http.ResponseWriter, r *http.Request) {
 	case p == "/rdir/found":
 		fmt.Fprint(w, "found under rdir")
 		return
+
+	// --- multi-dimensional decision scenarios ---------------------------
+	// The endpoints below model the false-negative classes the heuristics
+	// engine targets. They are inert unless a test requests them.
+	case p == "/md/login-redirect":
+		// Real resource that answers 302 to the login page: status-only
+		// matching on 200 misses it unless 302 is explicitly accepted.
+		w.Header().Set("Location", "/login")
+		w.WriteHeader(http.StatusFound)
+		fmt.Fprint(w, "redirecting to login")
+		return
+	case p == "/md/forbidden-real":
+		// Real resource behind authorization: 403 with a distinct body.
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, "forbidden: real admin resource with unique content")
+		return
+	case p == "/md/waf-block":
+		// WAF custom block page: 200 with a distinctive block body.
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "request blocked by edge security appliance reference WAF-42")
+		return
+	case p == "/md/soft-real":
+		// A real page whose length is close to the soft-404 but whose content
+		// differs; only a similarity/length combination separates it.
+		fmt.Fprint(w, "junk-like shell but this is the real soft-real payload body")
+		return
+	case strings.HasPrefix(p, "/md/ext/"):
+		// Per-extension behavior: .bak is forbidden, .php 404s, anything else
+		// is a generic not-found. A real .bak exists under /md/ext/backup.bak.
+		switch {
+		case p == "/md/ext/backup.bak":
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(w, "backup file exists but is forbidden unique-bak-body")
+		case strings.HasSuffix(p, ".bak"):
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(w, "forbidden extension generic")
+		case strings.HasSuffix(p, ".php"):
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, "php not found")
+		default:
+			notFound(w)
+		}
+		return
+	case strings.HasPrefix(p, "/md/"):
+		// Generic soft-404 for the /md tree: HTTP 200 with a constant body,
+		// including the random baseline probes.
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "the site soft 404 page not found template body")
+		return
 	}
 
 	notFound(w)

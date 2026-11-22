@@ -76,7 +76,24 @@
   "postflights": [],
   "preflight_mode": "per-request",
   "preflight_error": "abort",
-  "preflight_anyhost": false
+  "preflight_anyhost": false,
+  "heuristics": {
+    "enabled": false,
+    "length_threshold": 0,
+    "length_floor": 0,
+    "similarity_cutoff": 0,
+    "similarity_timeout_ms": 0,
+    "time_threshold": 0,
+    "score_threshold": 0,
+    "baseline_samples": 0,
+    "prewarm": true,
+    "suppressors_file": "",
+    "labels_file": ""
+  },
+  "checkpoint_dir": "",
+  "evidence_log": "",
+  "report_file": "",
+  "eval_flush_seconds": 5
 }
 
 --- matchers after SetupFilters ---

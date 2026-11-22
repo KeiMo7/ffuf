@@ -134,6 +134,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Optional layers: multi-dimensional decision engine, durable checkpoint
+	// and evidence log. All are no-ops unless their flags were given.
+	cleanupIntegrations, writeReport, err := setupIntegrations(conf, job)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Encountered error(s): %s\n", err)
+		os.Exit(1)
+	}
+	defer cleanupIntegrations()
+
 	if !conf.Noninteractive {
 		go func() {
 			err := interactive.Handle(job)
@@ -145,6 +154,8 @@ func main() {
 
 	// Job handles waiting for goroutines to complete itself
 	job.Start()
+	// End-of-run evaluation report (no-op without -eval-report/-labels).
+	writeReport()
 }
 
 // SetupFilters installs the matchers and filters onto conf.MatcherManager. The

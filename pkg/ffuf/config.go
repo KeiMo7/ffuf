@@ -42,6 +42,26 @@ type PreflightConfig struct {
 	Vars        []VarExtract `json:"vars" toml:"vars"`
 }
 
+// HeuristicsConfig is the resolved engine configuration carried on Config.
+// Thresholds of zero are replaced by heuristics.DefaultConfig when the Decider
+// is built, so the struct can be populated directly in tests as well as via
+// ConfigFromOptions.
+type HeuristicsConfig struct {
+	Enabled             bool    `json:"enabled"`
+	LengthThreshold     float64 `json:"length_threshold"`
+	LengthFloor         int64   `json:"length_floor"`
+	SimilarityCutoff    float64 `json:"similarity_cutoff"`
+	SimilarityTimeoutMS int     `json:"similarity_timeout_ms"`
+	TimeThreshold       float64 `json:"time_threshold"`
+	ScoreThreshold      float64 `json:"score_threshold"`
+	BaselineSamples     int     `json:"baseline_samples"`
+	Prewarm             bool    `json:"prewarm"`
+	SuppressorsFile     string  `json:"suppressors_file"`
+	// LabelsFile is the human ground-truth set used for the evaluation report.
+	// Not consulted during scanning; only by offline/end-of-run evaluation.
+	LabelsFile string `json:"labels_file"`
+}
+
 type Config struct {
 	AuditLog                  string                `json:"auditlog"`
 	AutoCalibration           bool                  `json:"autocalibration"`
@@ -115,6 +135,17 @@ type Config struct {
 	// The engine sets it so preflight/postflight requests (sent from the runner,
 	// outside the dispatch loop) also honor -rate and -p. Nil means unmetered.
 	RateLimitFunc func() `json:"-" toml:"-"`
+
+	// Heuristics holds the multi-dimensional decision engine configuration.
+	// Enabled is false by default: until -heuristics is passed, the legacy
+	// MatcherManager is the sole decision source and behavior is unchanged.
+	Heuristics HeuristicsConfig `json:"heuristics"`
+	// CheckpointDir/EvidenceLog/ReportFile/EvalFlush configure durable
+	// progress and the evidence trail. Empty strings disable each feature.
+	CheckpointDir string `json:"checkpoint_dir"`
+	EvidenceLog   string `json:"evidence_log"`
+	ReportFile    string `json:"report_file"`
+	EvalFlushSecs int    `json:"eval_flush_seconds"`
 	// Options retains the raw ConfigOptions this Config was built from, so the
 	// configuration can be re-serialized (FFUFHASH history and similar features)
 	// directly, with no hand-maintained reverse mapper. Set by ConfigFromOptions;

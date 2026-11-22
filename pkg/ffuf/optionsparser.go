@@ -18,12 +18,40 @@ import (
 )
 
 type ConfigOptions struct {
-	Filter  FilterOptions  `json:"filters"`
-	General GeneralOptions `json:"general"`
-	HTTP    HTTPOptions    `json:"http"`
-	Input   InputOptions   `json:"input"`
-	Matcher MatcherOptions `json:"matchers"`
-	Output  OutputOptions  `json:"output"`
+	Filter     FilterOptions     `json:"filters"`
+	General    GeneralOptions    `json:"general"`
+	HTTP       HTTPOptions       `json:"http"`
+	Input      InputOptions      `json:"input"`
+	Matcher    MatcherOptions    `json:"matchers"`
+	Output     OutputOptions     `json:"output"`
+	Heuristics HeuristicsOptions `json:"heuristics"`
+	Resume     ResumeOptions     `json:"resume"`
+}
+
+// HeuristicsOptions controls the multi-dimensional decision engine. Every
+// field defaults to the legacy behavior: HeuristicsEnabled is false and the
+// status-code matcher remains the sole decision source until it is set.
+type HeuristicsOptions struct {
+	HeuristicsEnabled   bool    `json:"heuristics_enabled" ffuf:"heuristics" section:"heuristics" usage:"Enable multi-dimensional hit determination (status, length, timing, content similarity) against per-extension baselines. Legacy status matching stays active and is never downgraded."`
+	LengthThreshold     float64 `json:"length_threshold" ffuf:"heur-length" section:"heuristics" usage:"Relative response-length difference from the group baseline that fires the length dimension (0-1, e.g. 0.15 = 15%)"`
+	LengthFloor         int     `json:"length_floor" ffuf:"heur-length-floor" section:"heuristics" usage:"Absolute byte margin below which a length difference is ignored even if the relative threshold is exceeded"`
+	SimilarityCutoff    float64 `json:"similarity_cutoff" ffuf:"heur-sim" section:"heuristics" usage:"Body similarity (0-1) at or below which content is considered different from the baseline. 1.0 = identical"`
+	SimilarityTimeoutMS int     `json:"similarity_timeout_ms" ffuf:"heur-sim-timeout" section:"heuristics" usage:"Millisecond budget for one similarity computation; on timeout the similarity dimension is skipped, the response is retained"`
+	TimeThreshold       float64 `json:"time_threshold" ffuf:"heur-time" section:"heuristics" usage:"Relative latency deviation above the baseline median that fires the (auxiliary-only) timing dimension, e.g. 1.0 = twice as slow"`
+	ScoreThreshold      float64 `json:"score_threshold" ffuf:"heur-score" section:"heuristics" usage:"Weighted dimension score at/above which a response is a hit when no single hard dimension fires. Timing alone can never reach it"`
+	BaselineSamples     int     `json:"baseline_samples" ffuf:"heur-baseline-samples" section:"heuristics" usage:"Number of nonexistent-path probes collected per extension group"`
+	NoPrewarm           bool    `json:"no_prewarm" ffuf:"heur-no-prewarm" section:"heuristics" usage:"Do not pre-collect baselines before scanning; collect each group lazily on first use"`
+	SuppressorsFile     string  `json:"suppressors_file" ffuf:"suppressors" section:"heuristics" usage:"JSON file of recorded false-positive signatures; matching responses are suppressed (and still logged)"`
+	LabelsFile          string  `json:"labels_file" ffuf:"labels" section:"heuristics" usage:"JSON array of human ground-truth labels ([{\"input\":\"x\",\"exists\":true}]) used by -eval-report; not consulted during scanning"`
+}
+
+// ResumeOptions controls durable progress (checkpoint) and the evidence log.
+type ResumeOptions struct {
+	CheckpointDir string `json:"checkpoint_dir" ffuf:"checkpoint" section:"resume" usage:"Directory for the durable scan state. Set it once and re-run the same command to resume; completed entries are skipped and prior hits retained"`
+	FlushSeconds  int    `json:"flush_seconds" ffuf:"checkpoint-flush" section:"resume" usage:"How often the checkpoint state is flushed to disk in seconds (also flushed on exit)"`
+	ResetState    bool   `json:"reset_state" ffuf:"checkpoint-reset" section:"resume" usage:"Discard any existing checkpoint for this scan configuration and start from scratch"`
+	EvidenceLog   string `json:"evidence_log" ffuf:"evidence-log" section:"resume" usage:"Append-only JSONL log recording every request with its per-dimension verdict evidence, including non-matches, for offline evaluation and diffs"`
+	ReportFile    string `json:"report_file" ffuf:"eval-report" section:"resume" usage:"After the scan, write an evaluation report (legacy vs heuristics recall/false-positive) to this JSON file"`
 }
 
 // The `ffuf`, `section`, `usage`, `kind` and `alias` struct tags are the single
@@ -201,6 +229,17 @@ func NewConfigOptions() *ConfigOptions {
 	c.Output.OutputFile = ""
 	c.Output.OutputFormat = "json"
 	c.Output.OutputSkipEmptyFile = false
+	// Heuristics defaults mirror heuristics.DefaultConfig; zero means "use the
+	// built-in default", resolved in ConfigFromOptions so CLI/config files can
+	// override with explicit values.
+	c.Heuristics.LengthThreshold = 0
+	c.Heuristics.LengthFloor = 0
+	c.Heuristics.SimilarityCutoff = 0
+	c.Heuristics.SimilarityTimeoutMS = 0
+	c.Heuristics.TimeThreshold = 0
+	c.Heuristics.ScoreThreshold = 0
+	c.Heuristics.BaselineSamples = 0
+	c.Resume.FlushSeconds = 5
 	return c
 }
 
@@ -724,6 +763,28 @@ func ConfigFromOptions(parseOpts *ConfigOptions, ctx context.Context, cancel con
 	if parseOpts.General.Verbose && parseOpts.General.Json {
 		errs.Add(fmt.Errorf("Cannot have -json and -v"))
 	}
+
+	// Multi-dimensional decision engine. Disabled unless explicitly enabled;
+	// zero-valued thresholds mean "take the built-in default" at Decider build.
+	h := parseOpts.Heuristics
+	conf.Heuristics = HeuristicsConfig{
+		Enabled:             h.HeuristicsEnabled,
+		LengthThreshold:     h.LengthThreshold,
+		LengthFloor:         int64(h.LengthFloor),
+		SimilarityCutoff:    h.SimilarityCutoff,
+		SimilarityTimeoutMS: h.SimilarityTimeoutMS,
+		TimeThreshold:       h.TimeThreshold,
+		ScoreThreshold:      h.ScoreThreshold,
+		BaselineSamples:     h.BaselineSamples,
+		Prewarm:             !h.NoPrewarm,
+		SuppressorsFile:     h.SuppressorsFile,
+		LabelsFile:          h.LabelsFile,
+	}
+	conf.CheckpointDir = parseOpts.Resume.CheckpointDir
+	conf.EvidenceLog = parseOpts.Resume.EvidenceLog
+	conf.ReportFile = parseOpts.Resume.ReportFile
+	conf.EvalFlushSecs = parseOpts.Resume.FlushSeconds
+
 	// Retain the source options so the configuration can be re-serialized later
 	// (history / FFUFHASH) without a hand-maintained reverse mapper. Deep-copy the
 	// slice fields so the retained snapshot shares no backing array with the caller's

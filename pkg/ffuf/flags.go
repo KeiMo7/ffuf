@@ -4,24 +4,27 @@ import (
 	"flag"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 )
 
 // Section keys — the help groups, in display order (rendered by help.go).
 const (
-	SectionHTTP    = "http"
-	SectionGeneral = "general"
-	SectionCompat  = "compat"
-	SectionMatcher = "matcher"
-	SectionFilter  = "filter"
-	SectionInput   = "input"
-	SectionOutput  = "output"
+	SectionHTTP       = "http"
+	SectionGeneral    = "general"
+	SectionCompat     = "compat"
+	SectionMatcher    = "matcher"
+	SectionFilter     = "filter"
+	SectionInput      = "input"
+	SectionOutput     = "output"
+	SectionHeuristics = "heuristics"
+	SectionResume     = "resume"
 )
 
 // isKnownSection reports whether s is one of the defined help sections.
 func isKnownSection(s string) bool {
 	switch s {
-	case SectionHTTP, SectionGeneral, SectionCompat, SectionMatcher, SectionFilter, SectionInput, SectionOutput:
+	case SectionHTTP, SectionGeneral, SectionCompat, SectionMatcher, SectionFilter, SectionInput, SectionOutput, SectionHeuristics, SectionResume:
 		return true
 	}
 	return false
@@ -54,6 +57,27 @@ type multiStringValue struct{ p *[]string }
 func (m *multiStringValue) String() string { return "" }
 func (m *multiStringValue) Set(v string) error {
 	*m.p = append(*m.p, v)
+	return nil
+}
+
+// float64Value backs the heuristic threshold flags. flag has no Float64Var
+// with 0-as-unset semantics, so a small dedicated type keeps the tagged-field
+// registration uniform with the bool/int/string cases.
+type float64Value struct{ p *float64 }
+
+func (f *float64Value) String() string {
+	if f == nil || f.p == nil {
+		return ""
+	}
+	return strconv.FormatFloat(*f.p, 'f', -1, 64)
+}
+
+func (f *float64Value) Set(v string) error {
+	n, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return fmt.Errorf("invalid float value %q: %w", v, err)
+	}
+	*f.p = n
 	return nil
 }
 
@@ -292,6 +316,8 @@ func bindField(fs *flag.FlagSet, name, usage, kind string, ptr interface{}) {
 		fs.BoolVar(p, name, *p, usage)
 	case *int:
 		fs.IntVar(p, name, *p, usage)
+	case *float64:
+		fs.Var(&float64Value{p}, name, usage)
 	case *string:
 		fs.StringVar(p, name, *p, usage)
 	case *[]string:
