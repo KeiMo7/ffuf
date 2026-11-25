@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ffuf/ffuf/v2/pkg/ffuf"
+	"github.com/ffuf/ffuf/v2/pkg/session"
 )
 
 // Job ties together Config, Runner, Input and Output
@@ -40,6 +43,21 @@ type Job struct {
 	Jobhash      string
 	Total        int
 	Rate         *RateThrottle
+
+	// Session records the stop reason and the result-dedup ledger. NewJob always
+	// builds it; a Job constructed as a literal may leave it nil, in which case
+	// the session calls below degrade to the pre-session behavior.
+	Session *session.Session
+
+	dedupEnabled bool  // true only when Config.Dedup is set and Session built cleanly
+	sessionErr   error // set when the configured session options were invalid
+
+	// stopCh is closed once a session-scope stop is requested, so the dispatch
+	// loop can abandon a blocked thread-slot wait and reach the drain instead of
+	// waiting for a worker that is itself waiting on cancellation. It is nil for
+	// a Job built as a literal, in which case the select below never fires.
+	stopCh   chan struct{}
+	stopOnce sync.Once
 
 	queue     *jobQueue
 	recursion *recursionManager
@@ -78,11 +96,40 @@ func NewJob(conf *ffuf.Config) *Job {
 	j.Config = conf
 	j.queue = newJobQueue()
 	j.Rate = NewRateThrottle(conf)
+	j.stopCh = make(chan struct{})
 	// Let the runner meter preflight/postflight requests against the same rate
 	// limiter as the main dispatch loop, so -rate/-p bound total outgoing volume
 	// rather than only the fuzzing requests.
 	conf.RateLimitFunc = func() { <-j.Rate.RateLimiter.C }
+
+	// Always build a session so stopping is accounted for, even without dedup. The
+	// configured dedup fields and capacity are only honored when -dedup is set; a
+	// bad configuration is recorded (and surfaced by Start) rather than fatal.
+	opts := session.Options{}
+	dedupFields := conf.DedupFields
+	if conf.Dedup {
+		opts.Capacity = conf.DedupCapacity
+		if len(dedupFields) > 0 {
+			opts.Fields = dedupFields
+		}
+	}
+	sess, err := session.New(opts)
+	if err != nil {
+		j.sessionErr = err
+		sess, _ = session.New(session.Options{})
+	}
+	j.Session = sess
+	j.dedupEnabled = conf.Dedup && j.sessionErr == nil && sess != nil
 	return &j
+}
+
+// Report returns a snapshot of the job's session accounting. A Job built without
+// a Session reports an empty one.
+func (j *Job) Report() session.Report {
+	if j.Session == nil {
+		return session.Report{}
+	}
+	return j.Session.Report()
 }
 
 // The per-run counters and run-state flags are mutated by the execution loop and
@@ -185,6 +232,19 @@ func (j *Job) Start() {
 		j.Total = j.Input.Total()
 	}
 
+	// A bad dedup configuration recorded by NewJob is not fatal: warn once and run
+	// the scan without dedup, exactly as if -dedup had not been given.
+	if j.sessionErr != nil {
+		j.Output.Warning(fmt.Sprintf("Disabling result deduplication: %s", j.sessionErr))
+	}
+	// Beginning the job opens the session gate and records the start time. A Job
+	// built as a literal with no Session simply skips this.
+	if j.Session != nil {
+		if err := j.Session.BeginJob(); err != nil {
+			j.Output.Warning(fmt.Sprintf("Session could not begin: %s", err))
+		}
+	}
+
 	defer j.Stop()
 
 	j.setRunning(true)
@@ -200,11 +260,30 @@ func (j *Job) Start() {
 		j.Reset(true)
 		j.setRunningJob(true)
 		j.startExecution(ctx)
+		// A session stop (interrupt, max-time, stop-on-*) ends the whole run; the
+		// current queue job's drain already happened in startExecution. Leave the
+		// loop without waiting for any remaining queued jobs.
+		if j.Session != nil && j.Session.Canceled() {
+			break
+		}
 	}
+
+	// Drain the session now that every worker has returned and no further input
+	// will be dispatched. This transitions the session running -> stopped and, on
+	// a clean run, records no reason at all.
+	if j.Session != nil {
+		_, _ = j.Session.Drain(context.Background())
+	}
+
+	// When a stop was requested during the run, print a one-line summary.
+	rep := j.Report()
 
 	err := j.Output.Finalize()
 	if err != nil {
 		j.Output.Error(err.Error())
+	}
+	if rep.Canceled && !j.Config.Quiet {
+		j.Output.Info(fmt.Sprintf("Session stopped: reason=%s, unique=%d, suppressed=%d", rep.Reason, len(rep.Entries), rep.Suppressed))
 	}
 }
 
@@ -219,6 +298,11 @@ func (j *Job) Reset(cycle bool) {
 	j.setCounter(0)
 	j.setSkipQueue(false)
 	j.setStartTimeJob(time.Now())
+	// Reopen the job gate for each queue job. The session stays running across
+	// jobs; only the per-job stop flag is cleared.
+	if j.Session != nil {
+		_ = j.Session.BeginJob()
+	}
 	if cycle {
 		j.Output.Cycle()
 	} else {
@@ -336,6 +420,7 @@ func (j *Job) startExecution(ctx jobContext) {
 	//Limiter blocks after reaching the buffer, ensuring limited concurrency
 	threadlimiter := make(chan bool, j.Config.Threads)
 
+dispatch:
 	for {
 		// Advancing the input cursor is done under inputMutex so an interactive
 		// restart (which calls Input.Reset) cannot race it.
@@ -350,14 +435,36 @@ func (j *Job) startExecution(ctx jobContext) {
 		j.CheckStop()
 
 		if !j.isRunning() {
-			defer j.Output.Warning(j.getError())
+			if msg := j.getError(); msg != "" {
+				defer j.Output.Warning(msg)
+			}
+			break
+		}
+		// The session gate is closed once a stop has been requested. Checking it
+		// here, right before dispatch, bounds the overshoot to a single request.
+		if j.Session != nil && !j.Session.GateOpen() {
+			if msg := j.getError(); msg != "" {
+				defer j.Output.Warning(msg)
+			}
+			j.setRunningJob(false)
 			break
 		}
 		j.pauseCheckpoint()
-		// Handle the rate & thread limiting
-		threadlimiter <- true
+		// Handle the rate & thread limiting. Both waits are interruptible by a
+		// session stop so the loop can reach the drain even when every thread slot
+		// is held by a request that will only finish on cancellation.
+		select {
+		case threadlimiter <- true:
+		case <-j.stopSignal():
+			break dispatch
+		}
 		// Ratelimiter handles the rate ticker
-		<-j.Rate.RateLimiter.C
+		select {
+		case <-j.Rate.RateLimiter.C:
+		case <-j.stopSignal():
+			<-threadlimiter
+			break dispatch
+		}
 
 		j.inputMutex.Lock()
 		nextInput := j.Input.Value()
@@ -372,6 +479,15 @@ func (j *Job) startExecution(ctx jobContext) {
 		go func() {
 			defer func() { <-threadlimiter }()
 			defer wg.Done()
+			// Register the in-flight request so the session's drain can wait for it.
+			// The gate was open at dispatch, but a stop may have arrived since; a
+			// refused Track means this request must not be sent.
+			if j.Session != nil {
+				if !j.Session.Track() {
+					return
+				}
+				defer j.Session.Release()
+			}
 			threadStart := time.Now()
 			j.runTask(ctx, nextInput, nextPosition, false)
 			j.sleepIfNeeded()
@@ -380,15 +496,49 @@ func (j *Job) startExecution(ctx jobContext) {
 		}()
 		if !j.isRunningJob() {
 			defer j.Output.Warning(j.getError())
-			// break, not return: fall through to wg.Wait() so the in-flight
-			// workers finish before Start() advances to the next queue job, which
-			// rewrites Config.Url / currentDepth / keyword-active state that those
-			// workers still read (the -maxtime-job drain race).
+			// break, not return: fall through to the drain so the in-flight workers
+			// finish before Start() advances to the next queue job, which rewrites
+			// Config.Url / currentDepth / keyword-active state that those workers
+			// still read (the -maxtime-job drain race).
 			break
 		}
 	}
+
+	j.drainSession()
 	wg.Wait()
 	j.updateProgress()
+}
+
+// stopSignal returns the channel closed when a session stop is requested, or nil
+// (which blocks forever in a select) for a Job with no stop channel.
+func (j *Job) stopSignal() <-chan struct{} {
+	return j.stopCh
+}
+
+// signalStop closes the stop channel exactly once, waking any dispatch wait.
+func (j *Job) signalStop() {
+	if j.stopCh == nil {
+		return
+	}
+	j.stopOnce.Do(func() { close(j.stopCh) })
+}
+
+// drainSession waits for in-flight requests to finish after a session stop was
+// requested, bounded by -cancel-grace. The last Release closes the session's zero
+// channel and wakes the drain; a zero grace window expires immediately, forcing
+// cancellation of whatever is still in flight. A job-scope stop (-maxtime-job) is
+// not a session stop, so it falls through to the normal wg.Wait() below instead.
+func (j *Job) drainSession() {
+	if j.Session == nil || !j.Session.Canceled() {
+		return
+	}
+	// Grace 0 means the drain window is already over: a zero timeout expires
+	// immediately, so any in-flight request forces cancellation of the context.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(j.Config.CancelGrace)*time.Second)
+	defer cancel()
+	if _, err := j.Session.Drain(ctx); errors.Is(err, session.ErrDrainTimeout) {
+		j.Config.Cancel()
+	}
 }
 
 func (j *Job) interruptMonitor() {
@@ -403,7 +553,6 @@ func (j *Job) interruptMonitor() {
 		}
 	}()
 }
-
 func (j *Job) runBackgroundTasks(wg *sync.WaitGroup) {
 	defer wg.Done()
 	totalProgress := j.Input.Total()
@@ -480,6 +629,13 @@ func (j *Job) runTask(ctx jobContext, input map[string][]byte, position int, ret
 
 	if err != nil {
 		if !retried {
+			// Do not retry once a stop has been requested: the request would be
+			// sent after the session has already been told to wind down.
+			if j.Session != nil && !j.Session.GateOpen() {
+				j.incError()
+				log.Printf("%s", err)
+				return
+			}
 			// Retry once. The timeout messaging below runs only on the final
 			// failure, so a request that recovers on retry does not also print a
 			// spurious timeout notice.
@@ -550,27 +706,32 @@ func (j *Job) runTask(ctx jobContext, input map[string][]byte, position int, ret
 	}
 
 	if j.isMatch(resp) {
-		// Re-send request through replay-proxy if needed
-		if j.ReplayRunner != nil {
-			replayreq, err := j.ReplayRunner.Prepare(input, &basereq)
-			replayreq.Position = position
-			if err != nil {
-				j.Output.Error(fmt.Sprintf("Encountered an error while preparing replayproxy request: %s\n", err))
-				j.incError()
-				log.Printf("%s", err)
-			} else {
-				_, _ = j.ReplayRunner.Execute(&replayreq)
+		if j.observe(&resp) {
+			// Re-send request through replay-proxy if needed
+			if j.ReplayRunner != nil {
+				replayreq, err := j.ReplayRunner.Prepare(input, &basereq)
+				replayreq.Position = position
+				if err != nil {
+					j.Output.Error(fmt.Sprintf("Encountered an error while preparing replayproxy request: %s\n", err))
+					j.incError()
+					log.Printf("%s", err)
+				} else {
+					_, _ = j.ReplayRunner.Execute(&replayreq)
+				}
 			}
-		}
-		j.Output.Result(resp)
+			j.Output.Result(resp)
 
-		// Refresh the progress indicator as we printed something out
-		j.updateProgress()
-		if j.Config.Recursion && j.Config.RecursionStrategy == "greedy" {
-			j.recursion.handleGreedy(ctx, resp)
+			// Refresh the progress indicator as we printed something out
+			j.updateProgress()
+			if j.Config.Recursion && j.Config.RecursionStrategy == "greedy" {
+				j.recursion.handleGreedy(ctx, resp)
+			}
+		} else {
+			// A duplicate is suppressed but still progresses the scan.
+			j.updateProgress()
 		}
 	} else {
-		if len(resp.ScraperData) > 0 {
+		if len(resp.ScraperData) > 0 && j.observe(&resp) {
 			// print the result anyway, as scraper found something
 			j.Output.Result(resp)
 		}
@@ -590,6 +751,33 @@ func (j *Job) handleScraperResult(resp *ffuf.Response, sres ffuf.ScraperResult) 
 	}
 }
 
+// observe routes a would-be result through the dedup ledger. It returns true when
+// the result should be printed (dedup disabled, or a first-seen fingerprint) and
+// false when it is a duplicate (or the session has closed) and must be dropped.
+// Every observation counts toward the session statistics, duplicates included.
+func (j *Job) observe(resp *ffuf.Response) bool {
+	if !j.dedupEnabled || j.Session == nil {
+		return true
+	}
+	verdict, err := j.Session.Observe(session.Observation{
+		URL:         resp.Request.Url,
+		Status:      resp.StatusCode,
+		Length:      resp.ContentLength,
+		Words:       resp.ContentWords,
+		Lines:       resp.ContentLines,
+		Redirect:    resp.GetRedirectLocation(false),
+		ContentType: resp.ContentType,
+		Position:    resp.Request.Position,
+	})
+	if err != nil {
+		// A closed session (late observation after drain) drops the result; any
+		// other error means the observation was not fingerprintable and is printed
+		// so nothing is silently lost.
+		return !errors.Is(err, session.ErrSessionClosed)
+	}
+	return !verdict.Duplicate
+}
+
 // CheckStop stops the job if stopping conditions are met
 func (j *Job) CheckStop() {
 	counter := j.getCounter()
@@ -599,21 +787,21 @@ func (j *Job) CheckStop() {
 			if float64(j.getCount403())/float64(counter) > 0.95 {
 				// Over 95% of requests are 403
 				j.setError("Getting an unusual amount of 403 responses, exiting.")
-				j.Stop()
+				j.StopWith(session.ReasonStopOn403)
 			}
 		}
 		if j.Config.StopOnErrors || j.Config.StopOnAll {
 			if j.getSpuriousErrorCounter() > j.Config.Threads*2 {
 				// Most of the requests are erroring
 				j.setError("Receiving spurious errors, exiting.")
-				j.Stop()
+				j.StopWith(session.ReasonSpuriousErrors)
 			}
 
 		}
 		if j.Config.StopOnAll && (float64(j.getCount429())/float64(counter) > 0.2) {
 			// Over 20% of responses are 429
 			j.setError("Getting an unusual amount of 429 responses, exiting.")
-			j.Stop()
+			j.StopWith(session.ReasonStopOn429)
 		}
 	}
 
@@ -623,7 +811,7 @@ func (j *Job) CheckStop() {
 		runningSecs := int(dur / time.Second)
 		if runningSecs >= j.Config.MaxTime {
 			j.setError("Maximum running time for entire process reached, exiting.")
-			j.Stop()
+			j.StopWith(session.ReasonMaxTime)
 		}
 	}
 
@@ -642,6 +830,12 @@ func (j *Job) CheckStop() {
 // Stop the execution of the Job
 func (j *Job) Stop() {
 	j.setRunning(false)
+	// Record an interrupt-scope stop before cancelling the context, so the
+	// session has a reason by the time workers observe the cancellation.
+	if j.Session != nil {
+		_ = j.Session.Request(session.ReasonInterrupt, session.ScopeSession)
+	}
+	j.signalStop()
 	j.Config.Cancel()
 	// Reopen the pause gate so no worker is left blocked at a checkpoint after a
 	// stop. Resume is a no-op when the job is not paused, and Pause refuses to
@@ -649,7 +843,27 @@ func (j *Job) Stop() {
 	j.Resume()
 }
 
-// Stop current, resume to next
+// StopWith records a session-scope stop with the given reason and reopens the
+// pause gate, but does NOT cancel the context immediately: the caller's dispatch
+// loop breaks out and startExecution drains in-flight requests (bounded by
+// -cancel-grace) before cancelling. This is how max-time and the stop-on-*
+// conditions end the session with an accounted-for reason.
+func (j *Job) StopWith(reason session.Reason) {
+	j.setRunning(false)
+	if j.Session != nil {
+		_ = j.Session.Request(reason, session.ScopeSession)
+	}
+	j.signalStop()
+	j.Resume()
+}
+
+// Next stops the current queue job and lets the main loop advance to the next.
+// It records a job-scope stop so the session gate closes without cancelling the
+// context: -maxtime-job ends only this queue job.
 func (j *Job) Next() {
 	j.setRunningJob(false)
+	if j.Session != nil {
+		_ = j.Session.Request(session.ReasonMaxTimeJob, session.ScopeJob)
+	}
+	j.Resume()
 }

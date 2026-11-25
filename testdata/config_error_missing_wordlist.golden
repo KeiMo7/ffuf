@@ -15,6 +15,14 @@ error: 1 errors occured.
   "configfile": "",
   "postdata": "",
   "debuglog": "",
+  "dedup_fields": [
+    "url",
+    "status",
+    "length",
+    "words",
+    "lines"
+  ],
+  "dedup_capacity": 100000,
   "delay": {
     "value": "0.00"
   },

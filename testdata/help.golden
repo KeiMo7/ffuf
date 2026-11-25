@@ -37,6 +37,7 @@ GENERAL OPTIONS:
   -ack                 Autocalibration keyword (default: FUZZ)
   -acs                 Custom auto-calibration strategies. Can be used multiple times. Implies -ac
   -c                   Colorize output. (default: false)
+  -cancel-grace        Seconds to let in-flight requests finish after a stop is requested. 0 cancels immediately. (default: 0)
   -config              Load configuration from a file
   -json                JSON output, printing newline-delimited JSON records (default: false)
   -maxtime             Maximum running time in seconds for entire process. (default: 0)
@@ -88,6 +89,9 @@ INPUT OPTIONS:
 OUTPUT OPTIONS:
   -audit-log           Write audit log containing all requests, responses and config
   -debug-log           Write all of the internal logging to the specified file.
+  -dedup               Suppress results whose response fingerprint was already seen in this session. (default: false)
+  -dedup-capacity      Maximum number of dedup fingerprints to remember. 0 means unlimited. (default: 100000)
+  -dedup-fields        Comma separated response fields that make up the dedup fingerprint. Must include url. Valid: url,status,length,words,lines,redirect,content-type (default: url,status,length,words,lines)
   -o                   Write output to file
   -od                  Directory path to store matched results to.
   -of                  Output file format. Available formats: json, ejson, html, md, csv, ecsv (or, 'all' for all formats) (default: json)

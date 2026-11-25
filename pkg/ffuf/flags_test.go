@@ -43,7 +43,7 @@ func TestRegisterFlags_Wellformed(t *testing.T) {
 		"preflight-var-auto": true, "postflight-var-auto": true,
 		// General
 		"V": true, "ac": true, "acc": true, "ach": true, "ack": true, "acs": true,
-		"c": true, "config": true, "json": true, "maxtime": true, "maxtime-job": true,
+		"c": true, "cancel-grace": true, "config": true, "json": true, "maxtime": true, "maxtime-job": true,
 		"noninteractive": true, "p": true, "rate": true, "s": true, "sa": true,
 		"scraperfile": true, "scrapers": true, "se": true, "search": true, "sf": true,
 		"t": true, "v": true,
@@ -55,7 +55,8 @@ func TestRegisterFlags_Wellformed(t *testing.T) {
 		"D": true, "e": true, "enc": true, "ic": true, "input-cmd": true, "input-num": true,
 		"input-shell": true, "mode": true, "request": true, "request-proto": true, "w": true,
 		// Output
-		"audit-log": true, "debug-log": true, "o": true, "od": true, "of": true, "or": true,
+		"audit-log": true, "debug-log": true, "dedup": true, "dedup-capacity": true,
+		"dedup-fields": true, "o": true, "od": true, "of": true, "or": true,
 		// Compat aliases
 		"cookie": true, "data": true, "data-ascii": true, "data-binary": true,
 		// Compat dummies

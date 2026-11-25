@@ -68,6 +68,7 @@ type GeneralOptions struct {
 	AutoCalibrationPerHost    bool     `json:"autocalibration_per_host" ffuf:"ach" section:"general" usage:"Per host autocalibration"`
 	AutoCalibrationStrategies []string `json:"autocalibration_strategies" ffuf:"acs" kind:"csvreplace" section:"general" usage:"Custom auto-calibration strategies. Can be used multiple times. Implies -ac"`
 	AutoCalibrationStrings    []string `json:"autocalibration_strings" ffuf:"acc" kind:"multistring" section:"general" usage:"Custom auto-calibration string. Can be used multiple times. Implies -ac"`
+	CancelGrace               int      `json:"cancel_grace" ffuf:"cancel-grace" section:"general" usage:"Seconds to let in-flight requests finish after a stop is requested. 0 cancels immediately."`
 	Colors                    bool     `json:"colors" ffuf:"c" section:"general" usage:"Colorize output."`
 	ConfigFile                string   `toml:"-" json:"config_file" ffuf:"config" section:"general" usage:"Load configuration from a file"`
 	Delay                     string   `json:"delay" ffuf:"p" section:"general" usage:"Seconds of delay between requests, or a range of random delay. For example \"0.1\" or \"0.1-2.0\""`
@@ -105,6 +106,9 @@ type InputOptions struct {
 type OutputOptions struct {
 	AuditLog            string `json:"audit_log" ffuf:"audit-log" section:"output" usage:"Write audit log containing all requests, responses and config"`
 	DebugLog            string `json:"debug_log" ffuf:"debug-log" section:"output" usage:"Write all of the internal logging to the specified file."`
+	Dedup               bool   `json:"dedup" ffuf:"dedup" section:"output" usage:"Suppress results whose response fingerprint was already seen in this session."`
+	DedupFields         string `json:"dedup_fields" ffuf:"dedup-fields" section:"output" usage:"Comma separated response fields that make up the dedup fingerprint. Must include url. Valid: url,status,length,words,lines,redirect,content-type"`
+	DedupCapacity       int    `json:"dedup_capacity" ffuf:"dedup-capacity" section:"output" usage:"Maximum number of dedup fingerprints to remember. 0 means unlimited."`
 	OutputDirectory     string `json:"output_directory" ffuf:"od" section:"output" usage:"Directory path to store matched results to."`
 	OutputFile          string `json:"output_file" ffuf:"o" section:"output" usage:"Write output to file"`
 	OutputFormat        string `json:"output_format" ffuf:"of" section:"output" usage:"Output file format. Available formats: json, ejson, html, md, csv, ecsv (or, 'all' for all formats)"`
@@ -144,6 +148,7 @@ func NewConfigOptions() *ConfigOptions {
 	c.General.AutoCalibration = false
 	c.General.AutoCalibrationKeyword = "FUZZ"
 	c.General.AutoCalibrationStrategies = []string{"basic"}
+	c.General.CancelGrace = 0
 	c.General.Colors = false
 	c.General.Delay = ""
 	c.General.Json = false
@@ -197,6 +202,9 @@ func NewConfigOptions() *ConfigOptions {
 	c.Matcher.Words = ""
 	c.Output.AuditLog = ""
 	c.Output.DebugLog = ""
+	c.Output.Dedup = false
+	c.Output.DedupFields = "url,status,length,words,lines"
+	c.Output.DedupCapacity = 100000
 	c.Output.OutputDirectory = ""
 	c.Output.OutputFile = ""
 	c.Output.OutputFormat = "json"
@@ -560,6 +568,26 @@ func ConfigFromOptions(parseOpts *ConfigOptions, ctx context.Context, cancel con
 	conf.DirSearchCompat = parseOpts.Input.DirSearchCompat
 	conf.Colors = parseOpts.General.Colors
 	conf.InputNum = parseOpts.Input.InputNum
+
+	// Deduplication and stop-grace settings. Invalid values are config errors so
+	// the process exits before sending any request.
+	conf.Dedup = parseOpts.Output.Dedup
+	conf.DedupCapacity = parseOpts.Output.DedupCapacity
+	if parseOpts.Output.DedupCapacity < 0 {
+		errs.Add(fmt.Errorf("-dedup-capacity must not be negative"))
+	}
+	if parseOpts.Output.DedupFields == "" {
+		conf.DedupFields = append([]string(nil), DefaultDedupFields...)
+	} else if fields, ferr := ParseDedupFields(parseOpts.Output.DedupFields); ferr != nil {
+		errs.Add(ferr)
+	} else {
+		conf.DedupFields = fields
+	}
+	if parseOpts.General.CancelGrace < 0 {
+		errs.Add(fmt.Errorf("-cancel-grace must not be negative"))
+	} else {
+		conf.CancelGrace = parseOpts.General.CancelGrace
+	}
 
 	conf.InputShell = parseOpts.Input.InputShell
 	conf.AuditLog = parseOpts.Output.AuditLog

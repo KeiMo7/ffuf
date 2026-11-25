@@ -408,25 +408,7 @@ func (s *Stdoutput) Result(resp ffuf.Response) {
 		resp.ResultFile = s.writeResultToFile(resp)
 	}
 
-	inputs := make(map[string][]byte, len(resp.Request.Input))
-	for k, v := range resp.Request.Input {
-		inputs[k] = v
-	}
-	sResult := ffuf.Result{
-		Input:            inputs,
-		Position:         resp.Request.Position,
-		StatusCode:       resp.StatusCode,
-		ContentLength:    resp.ContentLength,
-		ContentWords:     resp.ContentWords,
-		ContentLines:     resp.ContentLines,
-		ContentType:      resp.ContentType,
-		RedirectLocation: resp.GetRedirectLocation(false),
-		ScraperData:      resp.ScraperData,
-		Url:              resp.Request.Url,
-		Duration:         resp.Duration,
-		ResultFile:       resp.ResultFile,
-		Host:             resp.Request.Host,
-	}
+	sResult := ffuf.ResultFromResponse(resp)
 	s.resultMutex.Lock()
 	paused := s.paused
 	// Printed is the single source of truth for the pending count. Mark it under

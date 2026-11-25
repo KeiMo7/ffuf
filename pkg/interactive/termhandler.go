@@ -57,6 +57,11 @@ func (i *interactive) handleInput(in []byte) {
 			i.resumeJob()
 		case "restart":
 			i.Job.Reset(false)
+			// Clear the dedup ledger so a restart reprints results it would
+			// otherwise suppress as duplicates.
+			if i.Job.Session != nil {
+				i.Job.Session.ResetResults()
+			}
 			i.paused = false
 			i.Job.Output.SetPaused(false)
 			i.Job.Output.Info("Restarting the current ffuf job!")
